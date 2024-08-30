@@ -6,10 +6,10 @@ def set_logger(config):
     node_id = config.get('id')
     try:
         config.get('logger')
-        logger_type = config.get('logger').get('type')
+        logger_name = config.get('logger').get('name')
 
-        if logger_type is not None: #Set logger type
-            Logger_class = globals().get(logger_type, None)
+        if logger_name is not None: #Set logger type
+            Logger_class = globals().get(logger_name, None)
             kwargs = config.get('logger').get("kwargs", None)
 
             try:
@@ -21,7 +21,7 @@ def set_logger(config):
         else:
             raise TypeError
         
-        print(f"[+] using logger type: {logger_type} ")
+        print(f"[+] using logger type: {logger_name} ")
         
     except: #Default to JsonLogger
         print(f"[+] defaulting to logger type: JsonLogger")
@@ -129,13 +129,10 @@ class RedisLogger(BaseLogger):
 
 class ApiLogger(BaseLogger):
 
-    def __init__(self, node_id, url, api_key=None):
+    def __init__(self, node_id, url, headers={}):
         self.node_id = node_id
         self.url = url
-        if api_key:
-            self.headers = {'Authorization': f'token {api_key}'}
-        else: 
-            self.headers = {}
+        self.headers = headers
         self.whitelist_ips = []
         
     def log(self, logtype, transport, data='', extra={}):
