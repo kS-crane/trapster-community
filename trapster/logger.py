@@ -1,6 +1,34 @@
 from datetime import datetime, timezone
 import asyncio, httpx, redis, json, binascii
 
+
+def set_logger(config):
+    node_id = config.get('id')
+    try:
+        config.get('logger')
+        logger_type = config.get('logger').get('type')
+
+        if logger_type is not None: #Set logger type
+            Logger_class = globals().get(logger_type, None)
+            kwargs = config.get('logger').get("kwargs", None)
+
+            try:
+                logger = Logger_class(node_id, **kwargs)
+            except Exception as e:
+                print(f'[-] Invalid logger: {e}')
+                return
+            
+        else:
+            raise TypeError
+        
+        print(f"[+] using logger type: {logger_type} ")
+        
+    except: #Default to JsonLogger
+        print(f"[+] defaulting to logger type: JsonLogger")
+        return JsonLogger(node_id)
+    
+    return logger
+
 class BaseLogger(object):
     CONNECTION  = "connection"
     DATA        = "data"
@@ -10,6 +38,7 @@ class BaseLogger(object):
     def __init__(self, node_id):
         self.node_id = node_id
         self.whitelist_ips = []
+        self.type = "Base"
 
     def parse_log(self, logtype, transport, data='', extra={}):
         try:
@@ -53,6 +82,10 @@ class BaseLogger(object):
         return event
 
 class JsonLogger(BaseLogger):
+    def __init__(self, node_id):
+        self.node_id = node_id
+        self.whitelist_ips = []
+
     def log(self, logtype, transport, data='', extra={}):
         event = self.parse_log(logtype, transport, data, extra)
             
@@ -60,7 +93,7 @@ class JsonLogger(BaseLogger):
             print(event)
 
 class FileLogger(BaseLogger):
-    def __init__(self, node_id, logfile, mode = "w+"):
+    def __init__(self, node_id, logfile = "/var/log/trapster-community.log", mode = "w+"):
         self.node_id = node_id
         self.logfile = logfile
         self.mode = mode
@@ -96,11 +129,15 @@ class RedisLogger(BaseLogger):
 
 class ApiLogger(BaseLogger):
 
-    def __init__(self, node_id, api_key):
+    def __init__(self, node_id, url, api_key=None):
         self.node_id = node_id
-        self.headers = {'Authorization': f'token {api_key}'}
+        self.url = url
+        if api_key:
+            self.headers = {'Authorization': f'token {api_key}'}
+        else: 
+            self.headers = {}
         self.whitelist_ips = []
-
+        
     def log(self, logtype, transport, data='', extra={}):
         event = self.parse_log(logtype, transport, data, extra)
             
@@ -109,12 +146,10 @@ class ApiLogger(BaseLogger):
             loop.create_task(self.post_request(event))
 
     async def post_request(self, event):
-        print(event)
-        print('')
         response = await asyncio.to_thread(self._post_request_threaded, event)
         return response
 
     def _post_request_threaded(self, event):
         with httpx.Client(headers=self.headers) as client:
-            response = client.post('http://127.0.0.1:8000/api/v1/event/', json=event, timeout=10)
+            response = client.post(self.url, json=event, timeout=10)
         return response
