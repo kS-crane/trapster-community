@@ -1,0 +1,14 @@
+:msg, contains, "SYN: " {filename}
+& stop
+
+:msg, contains, "XMAS: " {filename}
+& stop
+
+:msg, contains, "NULL: " {filename}
+& stop
+
+:msg, contains, "FIN: " {filename}
+& stop
+
+:msg, contains, "OS: " {filename}
+& stop
