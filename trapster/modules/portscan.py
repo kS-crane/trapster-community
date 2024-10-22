@@ -37,7 +37,6 @@ class PortscanHoneypot(BaseHoneypot):
                 await self.parse_log(content)
 
     async def parse_log(self, content):
-    
         lines = content.splitlines()
         for line in lines:
             if "SYN: " in line:
