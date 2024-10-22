@@ -5,8 +5,8 @@ import logging
 
 from . import __version__
 from .modules import *
+from .modules import portscan, llmnr
 from .logger import set_logger
-from .modules import portscan
 
 class TrapsterManager:
     def __init__(self, config):
@@ -57,11 +57,13 @@ class TrapsterManager:
                     server = SnmpHoneypot(service_config, self.logger, bindaddr=ip)
                 elif service_type == 'portscan':
                     server = portscan.PortscanHoneypot(service_config, self.logger)
+                elif service_type == 'llmnr':
+                    server = llmnr.LlmnrHoneypot(service_config, self.logger, bindaddr=ip)
                 else:
                     logging.error(f"Unrecognized service {service_type}")
                     break                        
                 try:
-                    if service_type != 'portscan':
+                    if service_config.get('port'):
                         logging.info(f"Starting service {service_type} on port {service_config['port']}")
                     else:
                         logging.info(f"Starting service {service_type} ")
