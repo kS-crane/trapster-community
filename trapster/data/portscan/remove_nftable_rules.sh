@@ -6,4 +6,3 @@ nft delete set inet filter xmas_ip
 nft delete set inet filter null_ip
 nft delete set inet filter fin_ip
 nft delete set inet filter os_ip
-nft delete table inet filter
