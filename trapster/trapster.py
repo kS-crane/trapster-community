@@ -6,7 +6,6 @@ import logging
 from . import __version__
 from .modules import *
 from .logger import set_logger
-from .modules import portscan
 
 class TrapsterManager:
     def __init__(self, config):
