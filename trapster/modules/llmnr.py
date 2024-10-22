@@ -15,12 +15,14 @@ class LlmnrUdpProtocol(BaseProtocol):
         self.protocol_name = "llmnr"
         self.llmnr_port = 5355
         self.llmnr_address = '224.0.0.252'
+        self.timing = self.config.get('time', 18000)
+        self.machine = self.config.get('machine', 'D')
+        self.jitter = self.config.get('jitter', 1800)
+    
     def connection_made(self, transport) -> None:
         self.transport = transport
         self.loop = asyncio.get_running_loop()
-        machine = self.config.get('machine', 'D')
-        timing = self.config.get('timing', 15)
-        self.loop.create_task(self.broadcast_llmnr_message(machine, timing))
+        self.loop.create_task(self.broadcast_llmnr_message())
 
     def datagram_received(self, data, addr):
         src_ip, src_port = addr
@@ -33,7 +35,7 @@ class LlmnrUdpProtocol(BaseProtocol):
         data = data.decode()
         return data
 
-    def llmnr_query(self, message):
+    def llmnr_query(self):
         """Constructs LLMNR query in DNS format."""
         query = pack(">H", 0x000)  # Random transaction ID
         query += pack(">H", 0x0000 ) #flagsmachine
@@ -43,22 +45,23 @@ class LlmnrUdpProtocol(BaseProtocol):
         query += pack(">H", 0)  #additional
 
         # Create the DNS query structure
-        for part in message.split("."):
+        for part in self.machine.split("."):
             query += pack('B', len(part)) + part.encode('utf-8')
         
         query += pack("B", 0)
         query += pack(">H", 1)
         query += pack(">H", 1) 
         return query
-    
-    async def broadcast_llmnr_message(self, message, interval):
+
+    async def broadcast_llmnr_message(self):
         """Broadcast LLMNR messages to the LLMNR multicast address."""
         try:
             while True:
-                llmnr_message = self.llmnr_query(message)  # Specify the name to resolve
+                llmnr_message = self.llmnr_query()  # Specify the name to resolve
                 self.transport.sendto(llmnr_message, (self.llmnr_address, self.llmnr_port))
-                print(f"Broadcasted LLMNR: {message}")
-                await asyncio.sleep(interval)
+                print(f"Broadcasted LLMNR: {self.machine}")
+                total_time = self.timing + random.uniform(-self.jitter, self.jitter)
+                await asyncio.sleep(total_time)
         except:
             print("LLMNR broadcasting stopped.")
 
