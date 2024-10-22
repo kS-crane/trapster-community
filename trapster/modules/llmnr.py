@@ -15,14 +15,12 @@ class LlmnrUdpProtocol(BaseProtocol):
         self.llmnr_address = '224.0.0.252'
     
     def connection_made(self, transport) -> None:
-        print('transport')
         self.transport = transport
         self.loop = asyncio.get_running_loop()
         self.loop.create_task(self.broadcast_llmnr_message('sdf.local', 15))
 
     
     def datagram_received(self, data, addr):
-        print('datagram received')
         src_ip, src_port = addr
         dst_ip, dst_port = self.transport.get_extra_info('sockname')
         transport_udp = UdpTransporter(dst_ip, dst_port, src_ip, src_port)
@@ -60,8 +58,9 @@ class LlmnrUdpProtocol(BaseProtocol):
                 llmnr_message = self.llmnr_query(message)  # Specify the name to resolve
                 self.transport.sendto(llmnr_message, (self.llmnr_address, self.llmnr_port))
                 print(f"Broadcasted LLMNR: {message}")
+
                 await asyncio.sleep(interval)
-        except asyncio.CancelledError:
+        except:
             print("LLMNR broadcasting stopped.")
 
 class LlmnrHoneypot(BaseHoneypot):
