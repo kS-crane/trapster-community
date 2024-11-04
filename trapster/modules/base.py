@@ -82,3 +82,19 @@ class BaseHoneypot(object):
             await self.task
         except asyncio.CancelledError:
             logging.info(f"Server {self.bindaddr}:{self.port} is cancelled now")
+
+class BaseUDPHoneypot(BaseHoneypot):
+    async def _start_server(self):
+        loop = asyncio.get_running_loop()
+
+        # Create UDP server
+        self.transport, protocol = await loop.create_datagram_endpoint(lambda: self.handler_udp(), 
+                                    local_addr=(self.bindaddr, self.port))
+        
+    async def stop(self):
+        self.task.cancel()
+        self.transport.close()
+        try:
+            await self.task
+        except asyncio.CancelledError:
+            logging.info(f"Server {self.bindaddr}:{self.port} is cancelled now")

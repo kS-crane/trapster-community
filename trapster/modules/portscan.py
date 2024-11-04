@@ -39,19 +39,24 @@ class PortscanHoneypot(BaseHoneypot):
     async def parse_log(self, content):
     
         lines = content.splitlines()
+        dst_port = 1
         for line in lines:
             if "SYN: " in line:
                 split = "SYN: "
-                specific_name = 'SYNportscan'
+                specific_name = 'syn'
             elif "NULL: " in line:
                 split = "NULL: "
-                specific_name = 'NULLportscan'
+                specific_name = 'null'
             elif "FIN: " in line:
                 split = "FIN: "
-                specific_name = 'FINportscan'
+                specific_name = 'fin'
             elif "OS: " in line:
                 split = "OS: "
-                specific_name = 'OSportscan'
+                specific_name = 'os'
+                dst_port = 2
+            elif "XMAS: " in line:
+                split = "XMAS: "
+                specific_name = 'xmas'
             else:
                 continue
             
@@ -65,25 +70,26 @@ class PortscanHoneypot(BaseHoneypot):
                 else:
                     data_dictionary[item] = None
 
-            self.logger.log(specific_name + "." + self.logger.QUERY, None, extra={
+            self.logger.log(specific_name + "." + 'scanner', None, extra={
                 "src_ip" : data_dictionary['SRC'], 
                 "dst_ip" : data_dictionary['DST'], 
-                "dst_port" : data_dictionary['SPT'],
-                "src_port" : data_dictionary['DPT'],
+                "dst_port":  dst_port,
                 "flags" : flags
                 })  
+            
         return
 
     async def create_nft_config(self):
-        print('Config doesnt exist')
-        self.nft_config_file.touch()
+        if not os.path.exists(self.nft_config_file):
+            self.nft_config_file.touch()
+
         async with aiofiles.open(self.logger_rules, mode='r') as file:
             content = await file.read()
             content = content.format(filename=self.filename)
         async with aiofiles.open(self.nft_config_file, mode='w') as file:
             await file.write(content) 
+
         subprocess.run(['sudo', '/usr/bin/systemctl', 'restart', 'rsyslog'])
-        print('Created config')
 
     async def get_last_pos(self):
         async with aiofiles.open(self.filename, mode='r') as file:
@@ -91,14 +97,38 @@ class PortscanHoneypot(BaseHoneypot):
             return await file.tell()
 
     async def _start_server(self):
-        print('Removing old Trapster NFTable rules and replace')
+
+        await asyncio.sleep(2)
         await self.remove_rules()
-        subprocess.run(['sudo', 'nft', '-f', self.nft_rules])
+        max_retries = 5
+        retry_delay = 2 
+
+        command = 'sudo nft -f ' + self.nft_rules
+        for attempt in range(max_retries):
+            process = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+        
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode == 0:
+                break
+            else:
+                error_msg = stderr.decode()
+                
+                if 'resource busy' in error_msg:
+                    logging.info(f'Resource Busy error - Retrying in {retry_delay} seconds...')
+                    await self.remove_rules()
+                    await asyncio.sleep(retry_delay)  # Wait before retrying
+                else:
+                    logging.error('Non-recoverable error in Portscan; aborting.')
+                    break
 
         try:
             self.last_pos = await self.get_last_pos()
         except FileNotFoundError:
-            print('Creating log file')
             path = Path(self.filename)
             subprocess.run(['sudo', 'touch', self.filename])
             subprocess.run(['sudo', 'chmod', "640", self.filename])
@@ -111,8 +141,8 @@ class PortscanHoneypot(BaseHoneypot):
             subprocess.run(['sudo', 'rm', self.nft_config_file])
             
         #Create config file if doesnt exist
-        if not os.path.exists(self.nft_config_file):
-            await self.create_nft_config()
+        
+        await self.create_nft_config()
 
         while True:
             await self.read_file()
@@ -124,5 +154,8 @@ class PortscanHoneypot(BaseHoneypot):
     async def stop(self):
         #clean nftable rules
         await self.remove_rules()
-        await super().stop()
-
+        self.task.cancel()
+        try:
+            await self.task
+        except asyncio.CancelledError:
+            logging.info(f"Portscanner successfully stopped")

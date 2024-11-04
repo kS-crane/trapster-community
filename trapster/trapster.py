@@ -6,7 +6,6 @@ import logging
 from . import __version__
 from .modules import *
 from .logger import set_logger
-from .modules import portscan
 
 class TrapsterManager:
     def __init__(self, config):
@@ -53,40 +52,35 @@ class TrapsterManager:
                     server = TelnetHoneypot(service_config, self.logger, bindaddr=ip)
                 elif service_type == 'snmp':
                     server = SnmpHoneypot(service_config, self.logger, bindaddr=ip)
-                elif service_type == 'portscan':
-                    server = portscan.PortscanHoneypot(service_config, self.logger)
                 else:
                     logging.error(f"Unrecognized service {service_type}")
                     break                        
                 try:
-                    if service_type != 'portscan':
-                        logging.info(f"Starting service {service_type} on port {service_config['port']}")
-                    else:
-                        logging.info(f"Starting service {service_type} ")
+                    logging.info(f"Starting service {service_type} on port {service_config['port']}")
                     await server.start()
                 except Exception as e:
                     logging.error(f"Error starting {service_type}: {e}")
 
-    async def start_XXX(self, ip):
-        for XXX_type in self.config['XXX']:
-            for XXX_config in self.config['XXX'][XXX_type]:
-                if XXX_type == 'portscan':
-                    server = PortscanHoneypot(XXX_config, self.logger)
-                elif XXX_type == 'llmnr':
-                    server = LlmnrHoneypot(XXX_config, self.logger, bindaddr=ip)
+    async def start_scanner(self, ip):
+        for scanner_type in self.config['scanner']:
+            for scanner_config in self.config['scanner'][scanner_type]:
+                if scanner_type == 'portscan':
+                    server = PortscanHoneypot(scanner_config, self.logger)
+                elif scanner_type == 'llmnr':
+                    server = LlmnrHoneypot(scanner_config, self.logger, bindaddr=ip)
                 else:
-                    logging.error(f"Unrecognized XXX {XXX_type}")
+                    logging.error(f"Unrecognized scanner {scanner_type}")
                     break  
             try:
-                logging.info(f"Starting service {XXX_type} ")
+                logging.info(f"Starting service {scanner_type} ")
                 await server.start()
             except Exception as e:
-                logging.error(f"Error starting {XXX_type}: {e}")
+                logging.error(f"Error starting {scanner_type}: {e}")
 
     async def start(self):
         ip = self.get_ip(self.config.get('interface', None))
         await self.start_services(ip)
-        await self.start_XXX(ip)
+        await self.start_scanner(ip)
         while True:
             await asyncio.sleep(10)
 
