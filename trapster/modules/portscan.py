@@ -79,6 +79,7 @@ class PortscanHoneypot(BaseHoneypot):
         return
 
     async def create_nft_config(self):
+        print('createnft')
         if not os.path.exists(self.nft_config_file):
             self.nft_config_file.touch()
 
@@ -96,6 +97,7 @@ class PortscanHoneypot(BaseHoneypot):
             return await file.tell()
 
     async def _start_server(self):
+        print('start server')
 
         await asyncio.sleep(2)
         await self.remove_rules()
@@ -128,6 +130,7 @@ class PortscanHoneypot(BaseHoneypot):
         try:
             self.last_pos = await self.get_last_pos()
         except FileNotFoundError:
+            print('file not found')
             path = Path(self.filename)
             subprocess.run(['sudo', 'touch', self.filename])
             subprocess.run(['sudo', 'chmod', "640", self.filename])
