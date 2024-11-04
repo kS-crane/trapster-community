@@ -24,8 +24,6 @@ class TrapsterManager:
         return
     
     async def start_services(self, ip):
-    
-    async def start_services(self, ip):
         for service_type in self.config['services']:
             for service_config in self.config['services'][service_type]:
                 if service_type == 'ftp':
