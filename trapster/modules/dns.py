@@ -1,4 +1,4 @@
-from .base import BaseProtocol, BaseHoneypot, UdpTransporter
+from .base import BaseProtocol, BaseUDPHoneypot, UdpTransporter
 from .libs import dns
 
 import asyncio, logging
@@ -79,7 +79,7 @@ class DnsTcpProtocol(BaseProtocol):
     def __init__(self):
         self.protocol_name = "dns"  
 
-class DnsHoneypot(BaseHoneypot):
+class DnsHoneypot(BaseUDPHoneypot):
 
     def __init__(self, config, logger, bindaddr, proxy_dns_ip):
         super().__init__(config, logger, bindaddr)
@@ -96,7 +96,7 @@ class DnsHoneypot(BaseHoneypot):
         loop = asyncio.get_running_loop()
 
         # Create UDP server
-        transport, protocol = await loop.create_datagram_endpoint(lambda: self.handler_udp(), 
+        self.transport, protocol = await loop.create_datagram_endpoint(lambda: self.handler_udp(), 
                                     local_addr=(self.bindaddr, self.port))
         
         # Create TCP server

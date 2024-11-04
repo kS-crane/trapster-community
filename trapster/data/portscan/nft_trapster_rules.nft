@@ -2,7 +2,7 @@
 
 # IPv4 port scanning and information gathering detection
 add table inet filter
-add chain inet filter input { type filter hook input priority 1 ; policy accept ; }
+add chain inet filter trapster_portscan { type filter hook input priority 1 ; policy accept ; }
 
 # Port scanning detection chain
 add chain inet filter syn_scan
@@ -72,18 +72,18 @@ add set inet filter os_ip {
 
 #Already has established connection:
 #Handle OS Detection scan
-add rule inet filter input tcp flags {0x2b, 0x29} ip saddr @os_ip accept
-add rule inet filter input tcp flags == 0x2b ip saddr @syn_ip tcp option maxseg size 265 add @os_ip { ip saddr } log prefix "OS: " level info
-add rule inet filter input tcp flags == 0x29 ip saddr @syn_ip add @os_ip { ip saddr } log prefix "OS: " level info
+add rule inet filter trapster_portscan tcp flags {0x2b, 0x29} ip saddr @os_ip accept
+add rule inet filter trapster_portscan tcp flags == 0x2b ip saddr @syn_ip tcp option maxseg size 265 add @os_ip { ip saddr } log prefix "OS: " level info
+add rule inet filter trapster_portscan tcp flags == 0x29 ip saddr @syn_ip add @os_ip { ip saddr } log prefix "OS: " level info
 
 
 #accept loopback
-add rule inet filter input iif lo accept
-add rule inet filter input ct state established,related accept
+add rule inet filter trapster_portscan iif lo accept
+add rule inet filter trapster_portscan ct state established,related accept
 
 #Handle SYN scans
 #Send all SYN packets to syn_scan
-add rule inet filter input tcp flags == 0x02 jump syn_scan
+add rule inet filter trapster_portscan tcp flags == 0x02 jump syn_scan
 #Accept packets going to the same port (ex: 80 for ffuf)
 add rule inet filter syn_scan ip saddr . tcp dport @ip_to_ports accept
 #Track the src ip . dport pair
@@ -96,14 +96,14 @@ add rule inet filter syn_scan ip protocol tcp ct state new, untracked meter rate
 add rule inet filter syn_scan ip saddr @syn_ip log prefix "SYN: " level info
 
 #Handle XMAS scan
-add rule inet filter input tcp flags == 0x29 ip saddr @xmas_ip accept
-add rule inet filter input tcp flags == 0x29 limit rate over 2/second add @xmas_ip { ip saddr } log prefix "XMAS: " level info
-#add rule inet filter input
+add rule inet filter trapster_portscan tcp flags == 0x29 ip saddr @xmas_ip accept
+add rule inet filter trapster_portscan tcp flags == 0x29 limit rate over 2/second add @xmas_ip { ip saddr } log prefix "XMAS: " level info
+#add rule inet filter trapster_portscan
 
 #Handle NULL scan
-add rule inet filter input tcp flags == 0x0 ip saddr @null_ip accept
-add rule inet filter input tcp flags == 0x0 limit rate over 2/second add @null_ip { ip saddr } log prefix "NULL: " level info
+add rule inet filter trapster_portscan tcp flags == 0x0 ip saddr @null_ip accept
+add rule inet filter trapster_portscan tcp flags == 0x0 limit rate over 2/second add @null_ip { ip saddr } log prefix "NULL: " level info
 
 #Handle FIN scan
-add rule inet filter input tcp flags == 0x01 ip saddr @fin_ip accept
-add rule inet filter input tcp flags == 0x01 limit rate over 2/second add @fin_ip { ip saddr } log prefix "FIN: " level info
+add rule inet filter trapster_portscan tcp flags == 0x01 ip saddr @fin_ip accept
+add rule inet filter trapster_portscan tcp flags == 0x01 limit rate over 2/second add @fin_ip { ip saddr } log prefix "FIN: " level info

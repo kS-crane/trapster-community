@@ -1,4 +1,4 @@
-from .base import BaseProtocol, BaseHoneypot, UdpTransporter
+from .base import BaseProtocol, BaseUDPHoneypot, UdpTransporter
 
 import asyncio
 from scapy.all import SNMP
@@ -50,7 +50,7 @@ class SnmpUdpProtocol(BaseProtocol):
             
         return version, community, oids
 
-class SnmpHoneypot(BaseHoneypot):
+class SnmpHoneypot(BaseUDPHoneypot):
     """common class to all trapster instance"""
 
     def __init__(self, config, logger, bindaddr="0.0.0.0"):
@@ -60,10 +60,4 @@ class SnmpHoneypot(BaseHoneypot):
         self.handler.config = config
 
         self.handler_udp = SnmpUdpProtocol
-
-    async def _start_server(self):
-        loop = asyncio.get_running_loop()
-
-        # Create UDP server
-        transport, protocol = await loop.create_datagram_endpoint(lambda: self.handler_udp(), 
-                                    local_addr=(self.bindaddr, self.port))
+        
