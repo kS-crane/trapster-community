@@ -28,6 +28,34 @@ def set_logger(config):
     
     return logger
 
+
+def set_logger(config):
+    node_id = config.get('id')
+    try:
+        config.get('logger')
+        logger_name = config.get('logger').get('name')
+
+        if logger_name is not None: #Set logger type
+            Logger_class = globals().get(logger_name, None)
+            kwargs = config.get('logger').get("kwargs", None)
+
+            try:
+                logger = Logger_class(node_id, **kwargs)
+            except Exception as e:
+                print(f'[-] Invalid logger: {e}')
+                return
+            
+        else:
+            raise TypeError
+        
+        print(f"[+] using logger type: {logger_name} ")
+        
+    except: #Default to JsonLogger
+        print(f"[+] defaulting to logger type: JsonLogger")
+        return JsonLogger(node_id)
+    
+    return logger
+
 class BaseLogger(object):
     CONNECTION  = "connection"
     DATA        = "data"

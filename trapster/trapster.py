@@ -6,6 +6,7 @@ import logging
 from . import __version__
 from .modules import *
 from .logger import set_logger
+from .logger import set_logger
 
 class TrapsterManager:
     def __init__(self, config):
