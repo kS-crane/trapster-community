@@ -79,7 +79,7 @@ class PortscanHoneypot(BaseHoneypot):
         return
 
     async def create_nft_config(self):
-        print('createnft')
+        logging.info('Creating NFT Config file')
         if not os.path.exists(self.nft_config_file):
             self.nft_config_file.touch()
 
@@ -89,7 +89,7 @@ class PortscanHoneypot(BaseHoneypot):
         async with aiofiles.open(self.nft_config_file, mode='w') as file:
             await file.write(content) 
 
-        subprocess.run(['sudo', '/usr/bin/systemctl', 'restart', 'rsyslog'])
+        subprocess.run(['/usr/bin/systemctl', 'restart', 'rsyslog'])
 
     async def get_last_pos(self):
         async with aiofiles.open(self.filename, mode='r') as file:
@@ -97,7 +97,7 @@ class PortscanHoneypot(BaseHoneypot):
             return await file.tell()
 
     async def _start_server(self):
-        print('start server')
+        print('Start nmap server')
 
         await asyncio.sleep(2)
         await self.remove_rules()

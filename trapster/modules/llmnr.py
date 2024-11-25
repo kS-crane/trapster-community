@@ -55,15 +55,25 @@ class LlmnrUdpProtocol(BaseProtocol):
 
     async def broadcast_llmnr_message(self):
         """Broadcast LLMNR messages to the LLMNR multicast address."""
+        print(self.timing, self.machine, self.jitter)
+        llmnr_message = self.llmnr_query()  # Specify the name to resolve
+        self.transport.sendto(llmnr_message, (self.llmnr_address, self.llmnr_port))
+        print(f"Broadcasted LLMNR: {self.machine}")
+        total_time = self.timing + random.uniform(-self.jitter, self.jitter)
+        await asyncio.sleep(total_time)
         try:
+            
             while True:
                 llmnr_message = self.llmnr_query()  # Specify the name to resolve
                 self.transport.sendto(llmnr_message, (self.llmnr_address, self.llmnr_port))
                 print(f"Broadcasted LLMNR: {self.machine}")
                 total_time = self.timing + random.uniform(-self.jitter, self.jitter)
                 await asyncio.sleep(total_time)
+        except Exception as e:
+            logging.error(f'[-] LLMNR broadcasting error: {e}')
         except:
-            print("LLMNR broadcasting stopped.")
+            logging.info("LLMNR broadcasting stopped: ")
+
 
 class LlmnrHoneypot(BaseHoneypot):
     def __init__(self, config, logger, bindaddr='0.0.0.0'):
