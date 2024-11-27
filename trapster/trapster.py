@@ -62,26 +62,26 @@ class TrapsterManager:
                 except Exception as e:
                     logging.error(f"Error starting {service_type}: {e}")
 
-    async def start_scanner(self, ip):
-        for scanner_type in self.config['scanner']:
-            for scanner_config in self.config['scanner'][scanner_type]:
-                if scanner_type == 'portscan':
-                    server = PortscanHoneypot(scanner_config, self.logger)
-                elif scanner_type == 'llmnr':
-                    server = LlmnrHoneypot(scanner_config, self.logger, bindaddr=ip)
+    async def start_plugin(self, ip):
+        for plugin_type in self.config['plugin']:
+            for plugin_config in self.config['plugin'][plugin_type]:
+                if plugin_type == 'portscan':
+                    server = PortscanHoneypot(plugin_config, self.logger)
+                elif plugin_type == 'llmnr':
+                    server = LlmnrHoneypot(plugin_config, self.logger, bindaddr=ip)
                 else:
-                    logging.error(f"Unrecognized scanner {scanner_type}")
+                    logging.error(f"Unrecognized plugin {plugin_type}")
                     break  
             try:
-                logging.info(f"Starting service {scanner_type} ")
+                logging.info(f"Starting service {plugin_type} ")
                 await server.start()
             except Exception as e:
-                logging.error(f"Error starting {scanner_type}: {e}")
+                logging.error(f"Error starting {plugin_type}: {e}")
 
     async def start(self):
         ip = self.get_ip(self.config.get('interface', None))
         await self.start_services(ip)
-        await self.start_scanner(ip)
+        await self.start_plugin(ip)
         while True:
             await asyncio.sleep(10)
 
