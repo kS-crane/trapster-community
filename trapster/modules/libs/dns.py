@@ -34,6 +34,8 @@ def decode_labels(message, offset):
 
 DNS_QUERY_SECTION_FORMAT = struct.Struct("!2H")
 
+DNS_ANSWER_SECTION_FORMAT = struct.Struct("!6H")
+
 def decode_question_section(message, offset, qdcount):
     questions = []
 
@@ -50,6 +52,33 @@ def decode_question_section(message, offset, qdcount):
         questions.append(question)
 
     return questions, offset
+
+def decode_answer_section(message, offset, ancount):
+    answers = []
+
+    for _ in range(ancount):
+        aname, offset = decode_labels(message, offset)
+
+        # Decode the answer section (skipping the name pointer: 2 bytes for `c0`)
+        query_type, query_class, ttl, rdlength = struct.unpack("!HHIH", message[offset:offset + 10])
+        offset += 10 
+
+        #get ip based on rdata len
+        rdata = message[offset:offset + rdlength]
+        ip_address = ".".join(map(str, rdata))
+
+        # Assign variables
+        answer = {
+            "domain_name": aname,
+            "query_type": query_type,
+            "query_class": query_class,
+            "ttl": ttl,
+            "ip_address": ip_address
+        }
+
+        answers.append(answer)
+
+    return answers, offset
 
 
 DNS_QUERY_MESSAGE_HEADER = struct.Struct("!6H")
@@ -69,6 +98,8 @@ def decode_dns_message(message):
 
     offset = DNS_QUERY_MESSAGE_HEADER.size
     questions, offset = decode_question_section(message, offset, qdcount)
+    answers, offset = decode_answer_section(message, offset, ancount)
+
 
     result = {"id": id,
               "is_response": qr,
@@ -83,6 +114,10 @@ def decode_dns_message(message):
               "answer_count": ancount,
               "authority_count": nscount,
               "additional_count": arcount,
-              "questions": questions}
+              "questions": questions,
+              
+              }
+    if answers != []:
+        result["answers"] =  answers
 
     return result
