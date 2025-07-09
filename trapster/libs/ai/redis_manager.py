@@ -4,12 +4,13 @@ import hashlib
 from typing import List, Dict
 
 class RedisManager:
-    def __init__(self, host="localhost", port=6379, history_expiration=None, cache_expiration=3600):
+    def __init__(self, host="localhost", port=6379, history_expiration=None, cache_expiration=3600, session_id="unknown"):
         self.redis = None
         self.host = host
         self.port = port
         self.history_expiration = history_expiration # Purge history after expiration
         self.cache_expiration = cache_expiration # Purge cache after expiration
+        self.session_id = session_id
 
     async def connect(self):
         self.redis = await aioredis.from_url(
@@ -27,14 +28,31 @@ class RedisManager:
         history = await self.get_history(session_id)
         history.append(messages)
         await self.redis.set(f"history:{session_id}", json.dumps(history), ex=self.history_expiration)
-
+    
     async def get_cache(self, user_message: str) -> str:
         key = self._generate_key(user_message)
         return await self.redis.get(f"cache:{key}")
-
+ 
     async def set_cache(self, user_message: str, response: str):
         key = self._generate_key(user_message)
         await self.redis.set(f"cache:{key}", response, ex=self.cache_expiration)
-
+   
     def _generate_key(self, message: str) -> str:
         return hashlib.sha256(message.encode()).hexdigest()
+
+
+
+class TrapsterBashAI_RedisManager(RedisManager):
+    async def set_cache(self, user_message: str, response: str):
+        if user_message.lstrip().startswith("cat"):
+            key = self._generate_key(user_message)
+            return await self.redis.set(f"cache:{key}", response, ex=self.cache_expiration)
+        else:
+            return None
+    
+    def _generate_key(self, message: str) -> str:
+        if self.session_id == "unknown":
+            return hashlib.sha256(message.encode()).hexdigest()
+        else:
+            return self.session_id + ":" + hashlib.sha256(message.encode()).hexdigest()
+        
