@@ -1,4 +1,5 @@
-import uvicorn
+from hypercorn.config import Config
+from hypercorn.asyncio import serve
 import asyncio
 from starlette.requests import ClientDisconnect
 from fastapi import FastAPI, Request, Response
@@ -6,12 +7,25 @@ from fastapi import FastAPI, Request, Response
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from jinja2 import FileSystemLoader, Undefined
 import yaml
-import random, string, base64, mimetypes, re
+import random, string, base64, mimetypes, re, secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
 from trapster.modules.base import BaseHoneypot
 from trapster.ai import HTTPAgent
+
+def get_current_time(time_format=None) -> str:
+    """
+    Get the current UTC time.
+    Args:
+        time_format (str, optional): If 'epoch', return as UNIX timestamp
+    Returns:
+        float | str: Current time in the requested format.
+    """
+    if time_format == 'epoch':
+        return str(datetime.now(timezone.utc).timestamp())
+    else:
+        return datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT') # default format
 
 class HttpHandler:
     def __init__(self, config, logger):
@@ -25,6 +39,8 @@ class HttpHandler:
         self.USERNAME = config.get('username', None)
         self.PASSWORD = config.get('password', None)
         self.data_folder = Path(__file__).parent.parent / "data" / "http"
+
+        self.server_seed = secrets.token_hex(16)
     
     def setup(self):
         try:
@@ -96,7 +112,8 @@ class HttpHandler:
         )
         env.globals.update({
             'random': self.random_filter,
-            'get_current_time': lambda: datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT'),
+            'get_current_time': lambda time_format=None: get_current_time(time_format),
+            'server_seed': self.server_seed
         })
         env.undefined = Undefined
         return env
@@ -364,9 +381,9 @@ class HttpHandler:
                     
                     query_direct = self.parse_query_string(form_data)
                     for key, value in query_direct.items():
-                        if key in ['login', 'username','account', 'user%5Blogin%5D', 'j_username']:
+                        if key in ['usernamefld', 'login', 'username','account', 'user%5Blogin%5D', 'j_username']:
                             all_extra['username'] = value
-                        elif key in ['password', 'credential', 'passwd', 'user%5Bpassword%5D', 'j_password', 'secretkey']:
+                        elif key in ['passwordfld', 'password', 'credential', 'passwd', 'user%5Bpassword%5D', 'j_password', 'secretkey']:
                             all_extra['password'] = value
                     
                     # Handle XML/SOAP data
@@ -427,6 +444,7 @@ class HttpHoneypot(BaseHoneypot):
     def __init__(self, config, logger, bindaddr="0.0.0.0"):
         super().__init__(config, logger, bindaddr)
         self.port = config['port']
+        self.bindaddr = bindaddr if bindaddr is not None else "0.0.0.0"
         self.handler = HttpHandler(config=config, logger=logger)
         self.fastapi_app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
         self.app = None # will be set after route setup in start() method
@@ -458,22 +476,19 @@ class HttpHoneypot(BaseHoneypot):
         return await super().start()
     
     async def _start_server(self):
-        config = uvicorn.Config(
-            app=self.app,
-            host=self.bindaddr,
-            port=self.port,
-            log_level="error",
-            access_log=False,
-            server_header=False
-        )
+    # Hypercorn handles TLS from its Config; no need to build ssl_context yourself.
+        config = Config()
+        # Optional but nice: enable ALPN so clients can negotiate HTTP/2
+        config.alpn_protocols = ["http/1.1"]
+        # Quiet logs similar to your uvicorn settings
+        config.loglevel = "error"
+        config.accesslog = None
 
-        self.server = uvicorn.Server(config)
-        try:
-            await self.server.serve()
-        except asyncio.CancelledError:
-            self.server.should_exit = True
-            await self.server.shutdown()
-            raise
+        # Allow graceful programmatic shutdown via an asyncio.Event
+        self._shutdown_event = asyncio.Event()
+        
+        await serve(self.app, config, shutdown_trigger=self._shutdown_event.wait)
+        
 
     async def stop(self):
         if self.server:

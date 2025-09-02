@@ -2,7 +2,8 @@ from trapster.modules.http import HttpHandler, HttpHoneypot, HeaderCapitalizatio
 
 import ssl
 import asyncio
-import uvicorn
+from hypercorn.config import Config
+from hypercorn.asyncio import serve
 from fastapi import Request
 from pathlib import Path
 import datetime
@@ -28,7 +29,7 @@ class HttpsHoneypot(HttpHoneypot):
     def __init__(self, config, logger, bindaddr="0.0.0.0"):
         super().__init__(config, logger, bindaddr)
         self.handler = HttpsHandler(config=config, logger=logger)
-
+       
         self.COUNTRY_NAME = config.get("country_name") or None
         self.STATE_OR_PROVINCE_NAME = config.get("state_or_province_name") or None
         self.LOCALITY_NAME = config.get("locality_name") or None
@@ -58,19 +59,32 @@ class HttpsHoneypot(HttpHoneypot):
     async def _start_server(self):
         ssl_context = ssl.create_default_context(purpose=ssl.Purpose.CLIENT_AUTH)
         ssl_context.load_cert_chain(certfile=self.certificate_path, keyfile=self.key_path)
+        config = Config()
+
+        config.bind = [f"{self.bindaddr}:{self.port}"]     # host:port
+        config.certfile = str(self.certificate_path)       # TLS cert
+        config.keyfile = str(self.key_path)                # TLS key
+        # Optional but nice: enable ALPN so clients can negotiate HTTP/2
         
-        config = uvicorn.Config(
-            app=self.app,
-            host=self.bindaddr,
-            port=self.port,
-            log_level="error",
-            access_log=False,
-            server_header=False,
-            ssl_keyfile=str(self.key_path),
-            ssl_certfile=str(self.certificate_path)
-        )
-        self.server = uvicorn.Server(config)
-        await self.server.serve()
+        h2 = True
+        if h2:
+            config.alpn_protocols = ["h2"]
+        else:
+            config.alpn_protocols = ["http/1.1"]
+        print(config.alpn_protocols)
+        config.loglevel = "error"
+        config.accesslog = None
+
+        self._shutdown_event = asyncio.Event()
+
+        try:
+            # Serve the app; shutdown_trigger will stop gracefully
+            await serve(self.app, config, shutdown_trigger=self._shutdown_event.wait)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            return False    
+
 
     def generate_certificate(self):
         '''
@@ -103,7 +117,11 @@ class HttpsHoneypot(HttpHoneypot):
         ]
         subject = issuer = x509.Name(filter(None, name_attributes))
 
-        alt_names = x509.SubjectAlternativeName([x509.DNSName('localhost'),])
+        # Add both 'localhost' and 'mytest.local' as subject alternative names
+        alt_names = x509.SubjectAlternativeName([
+            x509.DNSName('localhost'),
+            x509.DNSName('mytest.local'), #testing with burpsuite
+        ])
 
         certification = (
             x509.CertificateBuilder()
