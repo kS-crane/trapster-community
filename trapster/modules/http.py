@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request, Response
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from jinja2 import FileSystemLoader, Undefined
 import yaml
-import random, string, base64, mimetypes, re, secrets
+import random, string, base64, mimetypes, re, secrets, uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,7 +23,7 @@ def get_current_time(time_format=None) -> str:
         float | str: Current time in the requested format.
     """
     if time_format == 'epoch':
-        return str(datetime.now(timezone.utc).timestamp())
+        return str(int(datetime.now(timezone.utc).timestamp()))
     else:
         return datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT') # default format
 
@@ -296,8 +296,7 @@ class HttpHandler:
         endpoint_config = self.get_endpoint_config(full_url, method)
         headers = {}
 
-        if endpoint_config:
-            # Use configured response    
+        if endpoint_config:# Use configured response from template  
             content, status_code = await self.get_content(endpoint_config, request)
             status_code = endpoint_config.get('status_code', status_code)
             headers = endpoint_config.get('headers', {})
@@ -306,14 +305,25 @@ class HttpHandler:
             else:
                 await self.log(request, self.logger.QUERY, status_code)
 
-        else:
+        else: #static file
             content, status_code, headers = await self.handle_static_file(request)
             # only default response is logged
+            #extract any headers at beginning of the content
+            content, headers = await self.extract_headers(content, headers)
 
         # Prepare response headers
         response_headers = self.http_config.get('headers', {}).copy()
-        response_headers.update(headers)
 
+        for key, value in headers.items():
+            if key == 'etag':
+                etag = str(uuid.uuid4())[:13] 
+                if value == 'W/': #weak etag
+                    response_headers[key] = 'W/"' + etag + '"'
+                else:
+                    response_headers[key] = '"' + etag + '"'
+            else:
+                response_headers[key] = value
+       
         # Determine content type, we cannot use both content_type variable and Content-Type in headers
         content_type = response_headers.pop('Content-Type', 'text/html')
 
@@ -336,6 +346,39 @@ class HttpHandler:
             return "", 500, {}
 
         return await self.handle_default(request)
+    
+    async def extract_headers(self, content, headers):
+        #TODO: add status code? testing
+        lines = content.splitlines()
+
+        if len(lines) == 0:
+            return content, headers
+        
+        def normalize(line):
+            return line.decode("utf-8", errors="replace") if isinstance(line, (bytes, bytearray)) else line
+        
+        lines = [normalize(line) for line in lines]
+        
+        index = 0
+        if lines[index].startswith("HTTP/"): 
+            index += 1
+
+        while index < len(lines):
+            if ":" in lines[index]:
+                key, value = lines[index].split(":", 1)
+                if key.lower() not in ["date", "expires", "last-modified", "content-length", "x-content-type-options"]:
+                    headers[key] = value.lstrip(" ")
+                index += 1
+            else:
+                break
+
+        if isinstance(content, (bytes, bytearray)):
+            body = b"\n".join(line.encode("utf-8") for line in lines[index+1:])
+        else:
+            body = "\n".join(lines[index+1:])
+
+        return body, headers
+
 
     async def handle_default(self, request):
         default_response = self.http_config.get('default')
@@ -476,17 +519,15 @@ class HttpHoneypot(BaseHoneypot):
         return await super().start()
     
     async def _start_server(self):
-    # Hypercorn handles TLS from its Config; no need to build ssl_context yourself.
         config = Config()
-        # Optional but nice: enable ALPN so clients can negotiate HTTP/2
+        config.bind = [f"{self.bindaddr}:{self.port}"]
         config.alpn_protocols = ["http/1.1"]
-        # Quiet logs similar to your uvicorn settings
         config.loglevel = "error"
         config.accesslog = None
-
-        # Allow graceful programmatic shutdown via an asyncio.Event
-        self._shutdown_event = asyncio.Event()
+        config.include_server_header = False
         
+
+        self._shutdown_event = asyncio.Event()
         await serve(self.app, config, shutdown_trigger=self._shutdown_event.wait)
         
 

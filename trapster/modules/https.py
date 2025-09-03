@@ -64,6 +64,7 @@ class HttpsHoneypot(HttpHoneypot):
         config.bind = [f"{self.bindaddr}:{self.port}"]     # host:port
         config.certfile = str(self.certificate_path)       # TLS cert
         config.keyfile = str(self.key_path)                # TLS key
+        config.include_server_header = False
         # Optional but nice: enable ALPN so clients can negotiate HTTP/2
         
         h2 = True
@@ -81,7 +82,7 @@ class HttpsHoneypot(HttpHoneypot):
             # Serve the app; shutdown_trigger will stop gracefully
             await serve(self.app, config, shutdown_trigger=self._shutdown_event.wait)
         except asyncio.CancelledError:
-            raise
+            pass
         except Exception as e:
             return False    
 
