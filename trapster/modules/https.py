@@ -40,23 +40,7 @@ class HttpsHoneypot(HttpHoneypot):
         self.certificate_path = Path(config.get("certificate", "/etc/trapster/ssl/certificate.pem"))
 
         self.generate_certificate()
-    
-    async def start(self):
-        self.handler.setup()
-        
-        @self.fastapi_app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE"])
-        async def catch_all(request: Request, path: str):
-            return await self.handler.handle_request(request)
-        
-        # Now wrap the FastAPI app with custom ASGI middleware for header capitalization
-        self.app = HeaderCapitalizationMiddleware(self.fastapi_app)
 
-        # Start the server in a background task
-        loop = asyncio.get_running_loop()
-        loop.set_exception_handler(self._exception_handler)
-        self.task = loop.create_task(self._start_server())
-        return self.task
-    
     async def _start_server(self):
         ssl_context = ssl.create_default_context(purpose=ssl.Purpose.CLIENT_AUTH)
         ssl_context.load_cert_chain(certfile=self.certificate_path, keyfile=self.key_path)
@@ -82,8 +66,6 @@ class HttpsHoneypot(HttpHoneypot):
             print(e)
             print("error in start server")
             return False  
-
-
 
     def generate_certificate(self):
         '''

@@ -1,0 +1,23 @@
+name: pfsense
+description: PFsense server
+headers:
+  Server: nginx
+
+common_headers: &common_headers
+  Content-Type: text/html
+  Connection: keep-alive
+  X-Frame-Options: SAMEORIGIN
+
+endpoints:
+  - "/":
+    - method: GET
+      headers:
+        <<: *common_headers
+        location: https://127.0.0.1:8443
+      status_code: 301  
+      file: 301.html    
+
+
+default:
+  status_code: 404  
+  file: 404.html

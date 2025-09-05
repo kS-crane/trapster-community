@@ -4,7 +4,6 @@ import asyncio
 from starlette.requests import ClientDisconnect
 from fastapi import FastAPI, Request, Response
 import ssl
-import signal
 from typing import Any
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from jinja2 import FileSystemLoader, Undefined
@@ -321,7 +320,7 @@ class HttpHandler:
             # only default response is logged
             #extract any headers at beginning of the content
             content, headers = await self.extract_headers(content, headers)
-
+       
         # Prepare response headers
         response_headers = self.http_config.get('headers', {}).copy()
 
@@ -330,7 +329,7 @@ class HttpHandler:
                 response_headers[key] = generate_etag(value)
             else:
                 response_headers[key] = value
-       
+
         # Determine content type, we cannot use both content_type variable and Content-Type in headers
         content_type = response_headers.pop('Content-Type', 'text/html')
 
@@ -357,13 +356,13 @@ class HttpHandler:
     async def extract_headers(self, content, headers) -> tuple[str, dict]:
         """
         Extract headers from beginning of file
+        in format like raw html (curl -i https://example.com)
         returns:
             - content: the content of the file without the headers
             - headers: a dictionary of the headers
         """
         #TODO: add status code? testing
         lines = content.splitlines()
-
         if len(lines) == 0:
             return content, headers
         
@@ -375,7 +374,6 @@ class HttpHandler:
         index = 0
         if lines[index].startswith("HTTP/"): 
             index += 1
-
         while index < len(lines):
             if ":" in lines[index]:
                 key, value = lines[index].split(":", 1)
@@ -385,13 +383,13 @@ class HttpHandler:
             else:
                 break
 
+        #return body without headers
         if isinstance(content, (bytes, bytearray)):
-            body = b"\n".join(line.encode("utf-8") for line in lines[index+1:])
+            body = b"\n".join(line.encode("utf-8") for line in lines[index:])
         else:
             body = "\n".join(lines[index+1:])
-
+        
         return body, headers
-
 
     async def handle_default(self, request):
         default_response = self.http_config.get('default')
@@ -540,7 +538,6 @@ class HttpHoneypot(BaseHoneypot):
         loop = asyncio.get_running_loop()
         loop.set_exception_handler(self._exception_handler)
         self.task = loop.create_task(self._start_server())
-        print("http server task created")
         return self.task
     
     async def _start_server(self):
@@ -564,5 +561,4 @@ class HttpHoneypot(BaseHoneypot):
     async def stop(self):
         self.shutdown_event.set()
         
-        print("stopping server")
         await super().stop()

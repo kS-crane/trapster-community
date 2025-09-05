@@ -1,0 +1,126 @@
+name: pfsense
+description: PFsense server
+headers:
+  Server: nginx
+  strict-transport-security: max-age=31536000
+  x-content-type-options: nosniff
+
+common_headers: &common_headers
+  content-type: text/html; charset=UTF-8
+  x-frame-options: SAMEORIGIN
+  last-modified: Tue, 02 Sep 2025 10:55:13 GMT
+  expires: Thu, 19 Nov 1981 08:52:00 GMT
+  cache-control: no-store, no-cache, must-revalidate
+  pragma: no-cache
+
+endpoints:
+  - "/":
+    - method: GET
+      headers:
+        <<: *common_headers
+      status_code: 200
+      file: index.html
+    - method: POST
+      query:
+      headers:
+        <<: *common_headers
+      status_code: 200
+      file: index_incorrect.html
+
+  - "/system.php":
+    - method: GET
+      headers:
+        <<: *common_headers
+      status_code: 200
+      file: index.html
+    - method: POST
+      headers:
+        <<: *common_headers
+      status_code: 200
+      file: index_incorrect.html
+
+  - "/graph.php":
+    - method: GET
+      headers:
+        <<: *common_headers
+      status_code: 200
+      file: index.html
+    - method: POST
+      headers:
+        <<: *common_headers
+      status_code: 200
+      file: index_incorrect.html
+
+  - "/status.php":
+    - method: GET
+      headers:
+        <<: *common_headers
+      status_code: 200
+      file: index.html
+    - method: POST
+      headers:
+        <<: *common_headers
+      status_code: 200
+      file: index_incorrect.html
+  
+  - "/index.php":
+    - method: GET
+      headers:
+        <<: *common_headers
+      status_code: 200
+      file: index.html
+    - method: POST
+      headers:
+        <<: *common_headers
+      status_code: 200
+      file: index_incorrect.html
+
+  - "/help.php":
+    - method: GET
+      headers:
+        <<: *common_headers
+      status_code: 200
+      file: index.html
+    - method: POST
+      headers:
+        <<: *common_headers
+      status_code: 200
+      file: index_incorrect.html
+
+  - "/stats.php":
+    - method: GET
+      headers:
+        <<: *common_headers
+      status_code: 200
+      file: index.html
+    - method: POST
+      headers:
+        <<: *common_headers
+      status_code: 200
+      file: index_incorrect.html
+
+  - "/wizard.php":
+    - method: GET
+      headers:
+        <<: *common_headers
+      status_code: 200
+      file: index.html
+    - method: POST
+      headers:
+        <<: *common_headers
+      status_code: 200
+      file: index_incorrect.html
+
+  - "/(.*).inc":
+    - method: GET
+      headers:
+        content-type: text/html
+      status_code: 403
+      file: 403.html
+  
+default:
+  status_code: 404 
+  headers:
+    <<: *common_headers
+    content-type: text/html
+  file: 404.html
