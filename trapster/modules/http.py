@@ -527,10 +527,6 @@ class HttpHoneypot(BaseHoneypot):
         else:
             loop.default_exception_handler(context)
     
-    #def _signal_handler(self, *_: Any) -> None:
-    #    print("http server signal handler")
-    #    self.shutdown_event.set()
-
     async def start(self):
         self.handler.setup()
         
@@ -543,8 +539,6 @@ class HttpHoneypot(BaseHoneypot):
 
         loop = asyncio.get_running_loop()
         loop.set_exception_handler(self._exception_handler)
-        #loop.add_signal_handler(signal.SIGTERM, self._signal_handler)
-        #loop.add_signal_handler(signal.SIGINT, self._signal_handler)
         self.task = loop.create_task(self._start_server())
         print("http server task created")
         return self.task
@@ -558,11 +552,17 @@ class HttpHoneypot(BaseHoneypot):
         config.include_server_header = False
 
         try:
-            await serve(self.app, config)
+            await serve(self.app, config, shutdown_trigger=self.shutdown_event.wait)
         except asyncio.CancelledError:
-            # Task was cancelled externally
-            print(f"Hypercorn server task cancelled on {self.bindaddr}:{self.port}")
+            print('raised asyncio.CancelledError')
             raise
         except Exception as e:
-            print(f"Server error: {e}")
+            print("560 : error in start server")
+            return False
+        return True
 
+    async def stop(self):
+        self.shutdown_event.set()
+        
+        print("stopping server")
+        await super().stop()

@@ -54,8 +54,6 @@ class HttpsHoneypot(HttpHoneypot):
         # Start the server in a background task
         loop = asyncio.get_running_loop()
         loop.set_exception_handler(self._exception_handler)
-        #loop.add_signal_handler(signal.SIGTERM, self._signal_handler)
-        #loop.add_signal_handler(signal.SIGINT, self._signal_handler)
         self.task = loop.create_task(self._start_server())
         return self.task
     
@@ -77,17 +75,13 @@ class HttpsHoneypot(HttpHoneypot):
         config.accesslog = None
 
         try:
-            await serve(self.app, config)
+            await serve(self.app, config, shutdown_trigger=self.shutdown_event.wait)
         except asyncio.CancelledError:
-            print(f"Hypercorn server task cancelled on {self.bindaddr}:{self.port}")
-            pass
+            raise
         except Exception as e:
-            if "Lifespan failure in shutdown" in str(e):
-                print("Lifespan failure in shutdown")
-            else:
-                print("error in start server")
-                print("error starting server: " + str(e))
-                pass    
+            print(e)
+            print("error in start server")
+            return False  
 
 
 
