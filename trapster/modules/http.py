@@ -3,7 +3,9 @@ from hypercorn.asyncio import serve
 import asyncio
 from starlette.requests import ClientDisconnect
 from fastapi import FastAPI, Request, Response
-
+import ssl
+import signal
+from typing import Any
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from jinja2 import FileSystemLoader, Undefined
 import yaml
@@ -26,6 +28,14 @@ def get_current_time(time_format=None) -> str:
         return str(int(datetime.now(timezone.utc).timestamp()))
     else:
         return datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT') # default format
+
+def generate_etag(value=None):
+    etag = str(uuid.uuid4())[:13] 
+    if value == 'W/': 
+        # if value is W/, return a weak etag
+        return 'W/"' + etag + '"'
+    else:
+        return '"' + etag + '"'
 
 class HttpHandler:
     def __init__(self, config, logger):
@@ -121,6 +131,7 @@ class HttpHandler:
     def get_endpoint_config(self, full_url, method):
         # Parse URL and query parameters
         base_url = full_url.split('?')[0]
+        
         query_string = full_url.split('?')[1] if '?' in full_url else ''
         query_params = {}
         if query_string:
@@ -131,6 +142,7 @@ class HttpHandler:
                 else:
                     query_params[param] = ''
         for endpoint in self.http_config.get('endpoints', []):
+          
             for route, details in endpoint.items():
                 # 1. Check base URL match first
                 if not re.fullmatch(route, base_url):
@@ -291,7 +303,6 @@ class HttpHandler:
             return await self.handle_error(request, 401)
 
         full_url = str(request.url).split(request.base_url.netloc, 1)[1]
-        
         method = request.method
         endpoint_config = self.get_endpoint_config(full_url, method)
         headers = {}
@@ -316,11 +327,7 @@ class HttpHandler:
 
         for key, value in headers.items():
             if key == 'etag':
-                etag = str(uuid.uuid4())[:13] 
-                if value == 'W/': #weak etag
-                    response_headers[key] = 'W/"' + etag + '"'
-                else:
-                    response_headers[key] = '"' + etag + '"'
+                response_headers[key] = generate_etag(value)
             else:
                 response_headers[key] = value
        
@@ -347,7 +354,13 @@ class HttpHandler:
 
         return await self.handle_default(request)
     
-    async def extract_headers(self, content, headers):
+    async def extract_headers(self, content, headers) -> tuple[str, dict]:
+        """
+        Extract headers from beginning of file
+        returns:
+            - content: the content of the file without the headers
+            - headers: a dictionary of the headers
+        """
         #TODO: add status code? testing
         lines = content.splitlines()
 
@@ -492,7 +505,7 @@ class HttpHoneypot(BaseHoneypot):
         self.fastapi_app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
         self.app = None # will be set after route setup in start() method
         self.server = None
-        
+        self.shutdown_event = asyncio.Event()
         # Add a middleware to handle custom methods
         @self.fastapi_app.middleware("http")
         async def custom_method_middleware(request: Request, call_next):
@@ -505,6 +518,18 @@ class HttpHoneypot(BaseHoneypot):
             
             # For standard methods, continue with normal FastAPI processing
             return await call_next(request)
+        
+    def _exception_handler(self, loop, context):
+        """Avoid printing ssl errors to the console"""
+        exception = context.get("exception")
+        if isinstance(exception, ssl.SSLError):
+            pass  # Handshake failure
+        else:
+            loop.default_exception_handler(context)
+    
+    #def _signal_handler(self, *_: Any) -> None:
+    #    print("http server signal handler")
+    #    self.shutdown_event.set()
 
     async def start(self):
         self.handler.setup()
@@ -515,8 +540,14 @@ class HttpHoneypot(BaseHoneypot):
         
         # Wrap the FastAPI app with custom ASGI middleware for header capitalization
         self.app = HeaderCapitalizationMiddleware(self.fastapi_app)
-        
-        return await super().start()
+
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(self._exception_handler)
+        #loop.add_signal_handler(signal.SIGTERM, self._signal_handler)
+        #loop.add_signal_handler(signal.SIGINT, self._signal_handler)
+        self.task = loop.create_task(self._start_server())
+        print("http server task created")
+        return self.task
     
     async def _start_server(self):
         config = Config()
@@ -525,17 +556,13 @@ class HttpHoneypot(BaseHoneypot):
         config.loglevel = "error"
         config.accesslog = None
         config.include_server_header = False
-        
 
-        self._shutdown_event = asyncio.Event()
-        await serve(self.app, config, shutdown_trigger=self._shutdown_event.wait)
-        
+        try:
+            await serve(self.app, config)
+        except asyncio.CancelledError:
+            # Task was cancelled externally
+            print(f"Hypercorn server task cancelled on {self.bindaddr}:{self.port}")
+            raise
+        except Exception as e:
+            print(f"Server error: {e}")
 
-    async def stop(self):
-        if self.server:
-            # Signal the server to shut down
-            self.server.should_exit = True
-            # Wait for the server to shut down
-            await self.server.shutdown()
-        
-        return await super().stop()

@@ -7,17 +7,17 @@ from hypercorn.asyncio import serve
 from fastapi import Request
 from pathlib import Path
 import datetime
-
+from typing import Any
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography import x509
 from cryptography.x509.oid import NameOID
-
+import signal
 from pathlib import Path
 import ssl
 import datetime
-
+import logging
 class HttpsHandler(HttpHandler):
     def __init__(self, config=None, logger=None):
         super().__init__(config, logger)
@@ -50,9 +50,12 @@ class HttpsHoneypot(HttpHoneypot):
         
         # Now wrap the FastAPI app with custom ASGI middleware for header capitalization
         self.app = HeaderCapitalizationMiddleware(self.fastapi_app)
-        
+
         # Start the server in a background task
         loop = asyncio.get_running_loop()
+        loop.set_exception_handler(self._exception_handler)
+        #loop.add_signal_handler(signal.SIGTERM, self._signal_handler)
+        #loop.add_signal_handler(signal.SIGINT, self._signal_handler)
         self.task = loop.create_task(self._start_server())
         return self.task
     
@@ -65,26 +68,27 @@ class HttpsHoneypot(HttpHoneypot):
         config.certfile = str(self.certificate_path)       # TLS cert
         config.keyfile = str(self.key_path)                # TLS key
         config.include_server_header = False
-        # Optional but nice: enable ALPN so clients can negotiate HTTP/2
-        
         h2 = True
         if h2:
             config.alpn_protocols = ["h2"]
         else:
             config.alpn_protocols = ["http/1.1"]
-        print(config.alpn_protocols)
         config.loglevel = "error"
         config.accesslog = None
 
-        self._shutdown_event = asyncio.Event()
-
         try:
-            # Serve the app; shutdown_trigger will stop gracefully
-            await serve(self.app, config, shutdown_trigger=self._shutdown_event.wait)
+            await serve(self.app, config)
         except asyncio.CancelledError:
+            print(f"Hypercorn server task cancelled on {self.bindaddr}:{self.port}")
             pass
         except Exception as e:
-            return False    
+            if "Lifespan failure in shutdown" in str(e):
+                print("Lifespan failure in shutdown")
+            else:
+                print("error in start server")
+                print("error starting server: " + str(e))
+                pass    
+
 
 
     def generate_certificate(self):
