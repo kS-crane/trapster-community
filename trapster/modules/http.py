@@ -28,13 +28,8 @@ def get_current_time(time_format=None) -> str:
     else:
         return datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT') # default format
 
-def generate_etag(value=None):
-    etag = str(uuid.uuid4())[:13] 
-    if value == 'W/': 
-        # if value is W/, return a weak etag
-        return 'W/"' + etag + '"'
-    else:
-        return '"' + etag + '"'
+
+
 
 class HttpHandler:
     def __init__(self, config, logger):
@@ -126,7 +121,26 @@ class HttpHandler:
         })
         env.undefined = Undefined
         return env
-
+    
+    def generate_etag(self, value=None, seed = ""):
+        etag_seed = self.server_seed + seed
+        if value == None or value.strip(" ") == "": #give generic etag
+            etag = str(uuid.uuid5(uuid.NAMESPACE_DNS, etag_seed))[:13]
+            return '"' + etag + '"'
+        else:
+            etag_length = len(value)
+            if '-' in value:
+                dash_index = value.find('-')
+                etag_start = str(uuid.uuid5(uuid.NAMESPACE_DNS, etag_seed).hex)[:dash_index]
+                etag_end = str(uuid.uuid5(uuid.NAMESPACE_DNS, etag_seed).hex)[dash_index:etag_length]
+                etag = etag_start + '-' + etag_end
+            else:
+                etag = str(uuid.uuid5(uuid.NAMESPACE_DNS, etag_seed).hex)[:etag_length]
+            if value[:2] == 'W/':  # if value is W/, return a weak etag
+                return 'W/"' + etag + '"'
+            else:
+                return '"' + etag + '"'
+            
     def get_endpoint_config(self, full_url, method):
         # Parse URL and query parameters
         base_url = full_url.split('?')[0]
@@ -219,6 +233,9 @@ class HttpHandler:
             return endpoint_config['content'], endpoint_config.get('status_code', 200)
         
         elif 'file' in endpoint_config:
+            if endpoint_config['file'] == None:
+                raise  ValueError("File not given for endpoint: ", endpoint_config)
+            
             file_path = self.template_folder / endpoint_config['file']
             try:
                 if file_path.resolve().relative_to(self.template_folder.resolve()):
@@ -310,6 +327,8 @@ class HttpHandler:
             content, status_code = await self.get_content(endpoint_config, request)
             status_code = endpoint_config.get('status_code', status_code)
             headers = endpoint_config.get('headers', {})
+            if headers == None:
+                headers = {}
             if method == "POST":
                 await self.log(request, self.logger.LOGIN, status_code)
             else:
@@ -325,8 +344,8 @@ class HttpHandler:
         response_headers = self.http_config.get('headers', {}).copy()
 
         for key, value in headers.items():
-            if key == 'etag':
-                response_headers[key] = generate_etag(value)
+            if key.lower() == 'etag':
+                response_headers[key] = self.generate_etag(value, seed = full_url)
             else:
                 response_headers[key] = value
 
@@ -352,43 +371,66 @@ class HttpHandler:
             return "", 500, {}
 
         return await self.handle_default(request)
-    
-    async def extract_headers(self, content, headers) -> tuple[str, dict]:
+
+    async def extract_headers_binary(self, content, headers = {}) -> tuple[str, dict]:
         """
-        Extract headers from beginning of file
-        in format like raw html (curl -i https://example.com)
+        Extract headers from beginning of a binary file
         returns:
             - content: the content of the file without the headers
             - headers: a dictionary of the headers
         """
-        #TODO: add status code? testing
-        lines = content.splitlines()
-        if len(lines) == 0:
+        if b"\r\n\r\n" in content:
+            header_bytes, body = content.split(b"\r\n\r\n", 1)
+        elif b"\n\n" in content:  # fallback if only LF used
+            header_bytes, body = content.split(b"\n\n", 1)
+        else:
             return content, headers
-        
-        def normalize(line):
-            return line.decode("utf-8", errors="replace") if isinstance(line, (bytes, bytearray)) else line
-        
-        lines = [normalize(line) for line in lines]
-        
+        lines = header_bytes.decode("utf-8", errors="replace").splitlines()
         index = 0
-        if lines[index].startswith("HTTP/"): 
-            index += 1
-        while index < len(lines):
-            if ":" in lines[index]:
-                key, value = lines[index].split(":", 1)
+        line = lines[index]
+
+        for line in lines:  
+            if ":" in line:
+                key, value = line.split(":", 1)
                 if key.lower() not in ["date", "expires", "last-modified", "content-length", "x-content-type-options"]:
                     headers[key] = value.lstrip(" ")
                 index += 1
             else:
                 break
+        return body, headers
 
-        #return body without headers
-        if isinstance(content, (bytes, bytearray)):
-            body = b"\n".join(line.encode("utf-8") for line in lines[index:])
-        else:
-            body = "\n".join(lines[index+1:])
+    async def extract_headers(self, content, headers = {}) -> tuple[str, dict]:
+        """
+        Extract headers from beginning of file
+        returns:
+            - content: the content of the file without the headers
+            - headers: a dictionary of the headers
+        """
+        #TODO: add status code? testing
+        if len(content) == 0:
+            return content, headers
         
+        if type(content) == bytes:
+            return await self.extract_headers_binary(content, headers)
+        
+        lines = content.splitlines()
+
+        index = 0
+        line = lines[index]
+        if line.startswith("HTTP/"): 
+            index += 1
+
+        while index < len(lines):
+            line = lines[index]
+            if ":" in line:
+                key, value = line.split(":", 1)
+                if key.lower() not in ["date", "expires", "last-modified", "content-length", "x-content-type-options"]:
+                    headers[key] = value.lstrip(" ")
+                index += 1
+            else:
+                break
+        
+        body = "\n".join(lines[index:])
         return body, headers
 
     async def handle_default(self, request):
@@ -554,7 +596,7 @@ class HttpHoneypot(BaseHoneypot):
             print('raised asyncio.CancelledError')
             raise
         except Exception as e:
-            print("560 : error in start server")
+            print(f"error in start server: {e}")
             return False
         return True
 
