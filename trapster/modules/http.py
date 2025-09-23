@@ -13,7 +13,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from trapster.modules.base import BaseHoneypot
-from trapster.ai import HTTPAgent
+
+# Optional AI import - gracefully handle when AI dependencies aren't installed
+try:
+    from trapster.ai import HTTPAgent
+    AI_AVAILABLE = True
+except ImportError:
+    HTTPAgent = None
+    AI_AVAILABLE = False
 
 def get_current_time(time_format=None) -> str:
     """
@@ -63,7 +70,8 @@ class HttpHandler:
         
         self.env = self.create_jinja_env()
 
-        self.http_agent = HTTPAgent()
+        # Initialize AI agent if available
+        self.http_agent = HTTPAgent() if AI_AVAILABLE else None
 
 
     @staticmethod
@@ -270,7 +278,12 @@ class HttpHandler:
             # make the request
             prompt = endpoint_config['ai'] + "\n" + request.url.path
 
-            result = await self.http_agent.make_query("http:"+session_id, prompt)
+            # Use AI agent if available, otherwise provide fallback
+            if self.http_agent:
+                result = await self.http_agent.make_query("http:"+session_id, prompt)
+            else:
+                # Fallback response when AI is not available
+                result = None
            
             if result == None:
                 return '', 404
