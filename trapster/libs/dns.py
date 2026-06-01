@@ -3,25 +3,40 @@ import struct
 # details of dns packet : https://courses.cs.duke.edu/fall16/compsci356/DNS/DNS-primer.pdf
 # code from https://stackoverflow.com/questions/16977588/reading-dns-packets-in-python
 
+import struct
+
 def decode_labels(message, offset):
     labels = []
+    return_offset = None
+    # Each pointer must jump strictly backward, so the max legal target
+    # shrinks monotonically. This bounds cycles and long chains.
+    max_allowed_pointer = len(message)
 
     while True:
+        if offset >= len(message):
+            raise ValueError("label offset out of bounds")
+
         length, = struct.unpack_from("!B", message, offset)
 
         if (length & 0xC0) == 0xC0:
             pointer, = struct.unpack_from("!H", message, offset)
-            offset += 2
-
-            return labels + decode_labels(message, pointer & 0x3FFF), offset
+            # Remember where to resume only for the first pointer followed.
+            if return_offset is None:
+                return_offset = offset + 2
+            target = pointer & 0x3FFF
+            if target >= max_allowed_pointer:
+                raise ValueError("invalid DNS compression pointer")
+            max_allowed_pointer = target
+            offset = target
+            continue
 
         if (length & 0xC0) != 0x00:
-            raise "unknown label encoding"
+            raise ValueError("unknown label encoding")
 
         offset += 1
 
         if length == 0:
-            return labels, offset
+            return labels, return_offset if return_offset is not None else offset
 
         labels.append(*struct.unpack_from("!%ds" % length, message, offset))
         try:

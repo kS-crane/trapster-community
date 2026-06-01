@@ -37,7 +37,10 @@ class DnsUdpProtocol(BaseProtocol):
         
     def datagram_received(self, data, addr):
         # decode dns packet to json
-        decoded_packet = dns.decode_dns_message(data)    
+        try:
+            decoded_packet = dns.decode_dns_message(data)    
+        except (ValueError, IndexError):
+            return
 
         # proxy packet to legit dns server
         self.loop = asyncio.get_running_loop()
