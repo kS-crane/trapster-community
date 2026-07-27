@@ -7,6 +7,7 @@ description: Learn how to create your own config file for the HTTP server
 
 # headers here are optional, and will be added to all responses
 headers:
+  Content-Type: text/html; charset=utf-8
   Server: nginx
   X-Powered-By: PHP/7.4.3
 

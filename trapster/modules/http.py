@@ -1,5 +1,6 @@
-import uvicorn
 import asyncio
+import hashlib
+import secrets
 
 from starlette.requests import ClientDisconnect
 from fastapi import FastAPI, Request, Response
@@ -7,11 +8,63 @@ from fastapi import FastAPI, Request, Response
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from jinja2 import FileSystemLoader, Undefined
 import yaml
-import random, string, base64, mimetypes, re
+import random, string, base64, mimetypes, re, uuid
+from urllib.parse import parse_qsl, quote
 from datetime import datetime, timezone
 from pathlib import Path
 
+mimetypes.add_type('image/x-icon', '.ico')
+
 from trapster.modules.base import BaseHoneypot
+
+# Synthetic header carrying a custom HTTP/1.1 reason phrase from the handler.
+# The reason patch consumes it; the middleware strips it on HTTP/2 (no reason).
+_REASON_HEADER = "x-trap-reason"
+
+# HTTP methods FastAPI routes natively; anything else is a "custom" method.
+STANDARD_METHODS = {"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE"}
+
+
+def _patch_hypercorn_reason():
+    """Let config.yaml override the HTTP/1.1 reason phrase.
+
+    Hypercorn builds an h11.Response without a reason, so h11 derives the
+    standard phrase from the status code. We wrap _send_h11_event so that, when
+    the response carries the synthetic reason header, the h11.Response is
+    rebuilt with that reason (and the header removed). HTTP/2 has no reason
+    phrase, so this only affects h11 connections.
+    """
+    try:
+        from hypercorn.protocol import h11 as hyper_h11
+        import h11 as h11lib
+    except Exception:
+        return
+
+    reason_header = _REASON_HEADER.encode("latin1")
+    original = hyper_h11.H11Protocol._send_h11_event
+
+    async def _send_h11_event(self, event):
+        if isinstance(event, h11lib.Response):
+            reason = None
+            headers = []
+            for name, value in event.headers:
+                if bytes(name).lower() == reason_header:
+                    reason = bytes(value)
+                else:
+                    headers.append((name, value))
+            if reason is not None:
+                event = h11lib.Response(
+                    status_code=event.status_code,
+                    headers=headers,
+                    http_version=event.http_version,
+                    reason=reason,
+                )
+        return await original(self, event)
+
+    hyper_h11.H11Protocol._send_h11_event = _send_h11_event
+
+
+_patch_hypercorn_reason()
 
 # Optional AI import - gracefully handle when AI dependencies aren't installed
 try:
@@ -20,6 +73,7 @@ try:
 except ImportError:
     HTTPAgent = None
     AI_AVAILABLE = False
+
 
 class HttpHandler:
     def __init__(self, config, logger):
@@ -38,7 +92,7 @@ class HttpHandler:
         self.USERNAME = self.config.get('username')
         self.PASSWORD = self.config.get('password')
         self.data_folder = Path(__file__).parent.parent / "data" / "http"
-    
+
     def setup(self):
         try:
             resolved_path = (self.data_folder / self.NAME).resolve()
@@ -53,52 +107,118 @@ class HttpHandler:
 
         with self.config_file.open('r') as file:
             self.http_config = yaml.safe_load(file)
-        
-        self.env = self.create_jinja_env()
 
-        # Initialize AI agent if available
+        self._resolve_deploy_config()
+        self.env = self.create_jinja_env()
+        # http_version: "2" offers HTTP/2 via ALPN (https only); clients that
+        # negotiate h2 get lowercase headers, h1.1 clients get Title-Case. The
+        # casing is decided per-request by the protocol, not by this flag.
+        version = str(self.http_config.get('http_version', '') or '').strip()
+        self.http2 = version in ('2', '2.0', 'h2')
         self.http_agent = HTTPAgent() if AI_AVAILABLE else None
 
+    # --- request / config helpers ------------------------------------------
 
     @staticmethod
     def parse_query_string(query_string):
-        # Parse query string into a dictionary
-        query_dict = {}
-        if query_string:
-            for param in query_string.split('&'):
-                if '=' in param:
-                    key, value = param.split('=', 1)
-                    query_dict[key] = value
-                else:
-                    query_dict[param] = ''
-        return query_dict
+        """Parse 'a=1&b=2&c' into {'a': '1', 'b': '2', 'c': ''}."""
+        params = {}
+        for param in query_string.split('&') if query_string else []:
+            key, sep, value = param.partition('=')
+            params[key] = value
+        return params
 
     async def sanitize_request(self, request):
-        if request:
-            body = None
-            if request.method in ["POST", "PUT", "PATCH"]:
-                body = await request.body()
-                body = body.decode() if body else None
-                
-            return { 
-                "url": request.url,
-                "path": request.url.path,
-                "method": request.method,
-                "headers": dict(request.headers),
-                "body": body,
-                "remote": request.client.host if request.client else None, 
-                "cookies": request.cookies,
-                "query_string": dict(request.query_params),
-                "content_type": request.headers.get("content-type"),
-                "host": request.headers.get("host"),
-                "secure": request.url.scheme == "https",
-                "scheme": request.url.scheme,
-                "path_qs": str(request.url).split(request.base_url.netloc, 1)[1]
-            }
-        
+        if not request:
+            return None
+
+        body = None
+        form = {}
+        if request.method in ["POST", "PUT", "PATCH"]:
+            raw = await request.body()
+            body = raw.decode() if raw else None
+            # Parse form-urlencoded bodies so templates can reflect fields back
+            # (e.g. the submitted username). Last value wins for repeated keys.
+            ctype = request.headers.get("content-type", "")
+            if body and "application/x-www-form-urlencoded" in ctype:
+                form = dict(parse_qsl(body, keep_blank_values=True))
+
+        return {
+            "url": request.url,
+            "path": request.url.path,
+            "method": request.method,
+            "headers": dict(request.headers),
+            "body": body,
+            "form": form,
+            "remote": request.client.host if request.client else None,
+            "cookies": request.cookies,
+            "query_string": dict(request.query_params),
+            "content_type": request.headers.get("content-type"),
+            "host": request.headers.get("host"),
+            "secure": request.url.scheme == "https",
+            "scheme": request.url.scheme,
+            "path_qs": str(request.url).split(request.base_url.netloc, 1)[1],
+        }
+
+    def _resolve_deploy_config(self):
+        """Evaluate Jinja expressions in config.yaml once at startup.
+
+        A random deploy_seed is generated per process (stable for the honeypot's
+        lifetime, unique across deployments) and exposed as {{ deploy_seed }}, so
+        vars produce values that differ per deployment but stay identical across
+        every request of a given deployment. Resolved vars become {{ vars.X }} in
+        every template. Global/per-endpoint headers and inline content are also
+        evaluated, letting fingerprint-prone values (etags, tokens, RSA keys)
+        live as Jinja expressions instead of hardcoded strings.
+        """
+        deploy_seed = self.config.get('deploy_seed') or secrets.token_hex(8)
+
+        eval_env = ImmutableSandboxedEnvironment(autoescape=False)
+        eval_env.globals['random'] = self.random_filter
+        eval_env.globals['deploy_seed'] = deploy_seed
+        eval_env.globals['md5'] = lambda s: hashlib.md5(str(s).encode()).hexdigest()
+
+        def evaluate(value):
+            if isinstance(value, str) and ('{{' in value or '{%' in value):
+                # Values referencing `request` are per-request (e.g. a redirect
+                # Location); leave them intact for render-time, not deploy-time.
+                if 'request' in value:
+                    return value
+                try:
+                    return eval_env.from_string(value).render()
+                except Exception:
+                    return value
+            if isinstance(value, dict):
+                return {k: evaluate(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [evaluate(v) for v in value]
+            return value
+
+        # Resolve vars sequentially so each entry can reference earlier ones via
+        # {{ vars.X }} (enables derived values like md5(vars.server_id)).
+        resolved_vars = {}
+        for key, value in self.http_config.get('vars', {}).items():
+            eval_env.globals['vars'] = resolved_vars
+            resolved_vars[key] = evaluate(value)
+        self.http_config['vars'] = resolved_vars
+        eval_env.globals['vars'] = resolved_vars
+
+        if 'headers' in self.http_config:
+            self.http_config['headers'] = evaluate(self.http_config['headers'])
+
+        for endpoint in self.http_config.get('endpoints', []):
+            for details in endpoint.values():
+                if not isinstance(details, list):
+                    details = [details]
+                for detail in details:
+                    if 'headers' in detail:
+                        detail['headers'] = evaluate(detail['headers'])
+                    if 'content' in detail:
+                        detail['content'] = evaluate(detail['content'])
+
     @staticmethod
     def random_filter(seed=None, alphabet=string.hexdigits[:-6], length=36):
-        # Jinja filter to generate a random string
+        """Jinja helper generating a (optionally seeded) random string."""
         if seed is not None:
             random.seed(seed)
         return ''.join(random.choice(alphabet) for _ in range(length))
@@ -106,84 +226,59 @@ class HttpHandler:
     def create_jinja_env(self):
         env = ImmutableSandboxedEnvironment(
             loader=FileSystemLoader(self.template_folder),
-            autoescape=True
+            autoescape=True,
+            # Keep the original document's trailing newline so a rendered page
+            # is byte-for-byte identical to the source (Content-Length tell).
+            keep_trailing_newline=True,
         )
         env.globals.update({
             'random': self.random_filter,
             'get_current_time': lambda: datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT'),
+            'uuid': lambda: str(uuid.uuid4()),
+            'vars': self.http_config.get('vars', {}),
         })
+        env.filters['quote'] = lambda s: quote(str(s), safe='')
         env.undefined = Undefined
         return env
 
+    @staticmethod
+    def _query_matches(rules, params):
+        """True if every query rule (regex per param) matches the request."""
+        return all(name in params and re.fullmatch(pattern, params[name])
+                   for name, pattern in rules.items())
+
     def get_endpoint_config(self, full_url, method):
-        # Parse URL and query parameters
-        base_url = full_url.split('?')[0]
-        query_string = full_url.split('?')[1] if '?' in full_url else ''
-        query_params = {}
-        if query_string:
-            for param in query_string.split('&'):
-                if '=' in param:
-                    key, value = param.split('=', 1)
-                    query_params[key] = value
-                else:
-                    query_params[param] = ''
+        """Find the config entry matching this URL + method (+ query rules)."""
+        base_url, _, query_string = full_url.partition('?')
+        query_params = self.parse_query_string(query_string)
+
         for endpoint in self.http_config.get('endpoints', []):
             for route, details in endpoint.items():
-                # 1. Check base URL match first
                 if not re.fullmatch(route, base_url):
                     continue
-
-                # 2. Check method match
                 if not isinstance(details, list):
-                    details = [details]  # Convert single config to list format
+                    details = [details]
+                candidates = [d for d in details if d['method'] == method]
 
-                # Find all configs that match the method
-                matching_configs = [d for d in details if d['method'] == method]
-                if not matching_configs:
-                    continue
-                
-                # 3. Handle query parameters
-                if not query_params:
-                    # URL has no query params - look for config without query rules
-                    no_query_config = next((d for d in matching_configs if not d.get('query')), None)
-                    if no_query_config:
-                        return no_query_config
-                else:
-                    # URL has query params - try to find matching query rules
-                    for config in matching_configs:
-                        if not config.get('query'):
-                            continue
-                        
-                        # Check each query parameter rule
-                        matches_all = True
-                        query_rules = config['query']
-                        for param_name, pattern in query_rules.items():
-                            if param_name not in query_params or not re.fullmatch(pattern, query_params[param_name]):
-                                matches_all = False
-                                break
-                        if not matches_all:
-                            continue
-                        
-                        if matches_all:
-                            return config
-
-                    # If no query rules matched but we have a base URL match,
-                    # return the first config without query rules
-                    no_query_config = next((d for d in matching_configs if not d.get('query')), None)
-                    if no_query_config:
-                        return no_query_config
-        
+                # Prefer a config whose query rules all match the request,
+                # otherwise fall back to one with no query rules.
+                for config in candidates:
+                    if config.get('query') and self._query_matches(config['query'], query_params):
+                        return config
+                fallback = next((d for d in candidates if not d.get('query')), None)
+                if fallback:
+                    return fallback
         return None
 
     def parse_front_matter(self, content):
-        """
-        This allows the rendered template to overwrite the status code of the request using:
+        """Extract optional YAML-ish front matter, allowing a template to set
+        its own status code:
+
             ---
             status_code: 500
             ---
 
-        Returns:
-            tuple: A dictionary of metadata (e.g., status_code) and the template content.
+        Returns (metadata_dict, body).
         """
         if content.startswith('---'):
             parts = content.split('---', 2)
@@ -195,164 +290,290 @@ class HttpHandler:
                         key, value = line.split(':', 1)
                         metadata[key.strip()] = value.strip()
                 return metadata, body
-        return {}, content  # No front matter found, return empty metadata
+        return {}, content
+
+    # --- content / response building ---------------------------------------
 
     async def get_content(self, endpoint_config, request=None):
         if not endpoint_config:
             return "", 200
-        
+
         if 'content' in endpoint_config:
             return endpoint_config['content'], endpoint_config.get('status_code', 200)
-        
-        elif 'file' in endpoint_config:
-            file_path = self.template_folder / endpoint_config['file']
+
+        if 'file' in endpoint_config:
+            file_path = (self.template_folder / endpoint_config['file']).resolve()
             try:
-                if file_path.resolve().relative_to(self.template_folder.resolve()):
-                    file_path = file_path.resolve()
-                    # Read the template file
-                    with file_path.open('r') as file:
-                        raw_content = file.read()
-
-                    # Add the request object to the template and render it
-                    template = self.env.from_string(raw_content)
-                    template.globals['request'] = await self.sanitize_request(request)
-                    rendered_output = template.render()
-
-                    # Parse the front matter and template content
-                    metadata, template_content = self.parse_front_matter(rendered_output)
-
-                    # Extract the status_code from metadata or default to 200
-                    status_code = int(metadata.get('status_code', 200))
-
-                    return template_content, status_code
+                # Guard against path traversal outside the template folder.
+                file_path.relative_to(self.template_folder.resolve())
+                raw_content = file_path.read_text()
+                template = self.env.from_string(raw_content)
+                template.globals['request'] = await self.sanitize_request(request)
+                metadata, body = self.parse_front_matter(template.render())
+                return body, int(metadata.get('status_code', 200))
             except (ValueError, FileNotFoundError) as e:
                 print(f"Error: {e}")
-                pass
 
         elif 'ai' in endpoint_config:
-            # experimental ai response
-            peer_addr = request.client.host
-            session_id = peer_addr
-
-            # get custom AI prompt from config.yaml
-            # add the request.url.path to the prompt
-            # make the request
+            # experimental AI response: prompt = configured text + requested path
+            session_id = request.client.host
             prompt = endpoint_config['ai'] + "\n" + request.url.path
-
-            # Use AI agent if available, otherwise provide fallback
-            if self.http_agent:
-                result = await self.http_agent.make_query("http:"+session_id, prompt)
-            else:
-                # Fallback response when AI is not available
-                result = None
-           
-            if result == None:
+            result = await self.http_agent.make_query("http:" + session_id, prompt) if self.http_agent else None
+            if result is None:
                 return '', 404
-            result = result.replace('```json\n', '').replace('\n```', '') # sometime the AI response is wrapped in ```json
+            # the AI response is sometimes wrapped in a ```json block
+            result = result.replace('```json\n', '').replace('\n```', '')
             return result, 200
-        
+
         return "", 404
 
-    async def handle_error(self, request, error_code):
-        # Check if errors is defined in config.yaml
-        # otherwise use a error template (like 401.html)
-        # otherwise send nothing
-        error_config = self.http_config.get('errors', {}).get(str(error_code))
-        if error_config:
-            content, _ = await self.get_content(error_config)
-        else:
-            content, _ = await self.get_content({"file": f"{error_code}.html"})
+    @staticmethod
+    def _strip_ctl(value):
+        """Drop CR/LF and other control chars. Rendered header and reason values
+        can contain attacker data (request.path, request.method); stripping
+        control chars prevents HTTP response / status-line injection."""
+        return ''.join(c for c in value
+                       if c == '\t' or (' ' <= c < '\x7f') or c > '\xa0')
 
-        headers = self.http_config.get('headers', {}).copy()
-        headers.update(self.http_config.get('errors', {}).get(str(error_code), {}).get('headers', {}))
-        
-        if error_code == 401:
-            headers['WWW-Authenticate'] = 'Basic realm="Restricted Area"'
+    @staticmethod
+    def _is_not_modified(request, headers: dict) -> bool:
+        """True if the request's conditional headers indicate the resource is unchanged."""
+        etag = next((v for k, v in headers.items() if k.lower() == "etag"), None)
+        if etag:
+            inm = request.headers.get("if-none-match", "")
+            if inm and (inm.strip('"') == etag.strip('"') or inm == "*"):
+                return True
+        last_modified = next((v for k, v in headers.items() if k.lower() == "last-modified"), None)
+        if last_modified:
+            ims = request.headers.get("if-modified-since", "")
+            if ims:
+                try:
+                    from email.utils import parsedate_to_datetime
+                    if parsedate_to_datetime(ims) >= parsedate_to_datetime(last_modified):
+                        return True
+                except Exception:
+                    if ims == last_modified:
+                        return True
+        return False
 
-        await self.log(request, self.logger.QUERY, error_code)
-        return Response(content=content, media_type='text/html', status_code=error_code, headers=headers)
-
-    async def check_auth(self, request):
-        if not self.BASIC_AUTH:
-            return True
-            
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Basic '):
-            return False
-        encoded_credentials = auth_header.split(' ', 1)[1]
+    def _render_reason(self, config, request_info):
+        """Render a config entry's optional 'reason' Jinja template to a string."""
+        raw = config.get("reason") if config else None
+        if not raw:
+            return None
         try:
-            username, password = base64.b64decode(encoded_credentials).decode('utf-8').split(':')
-            await self.log(request, self.logger.LOGIN, 401, extra={"username": username, "password": password})
-            return username == self.USERNAME and password == self.PASSWORD
-        except Exception as e:
-            print(f"Error: {e}")
-            return False
+            template = self.env.from_string(raw)
+            template.globals["request"] = request_info
+            return self._strip_ctl(template.render().strip()) or None
+        except Exception:
+            return None
+
+    async def _add_reason_header(self, headers, config, request):
+        """Attach the custom reason phrase (if any) as the synthetic header."""
+        reason = self._render_reason(config, await self.sanitize_request(request))
+        if reason:
+            headers[_REASON_HEADER] = reason
+
+    # --- delay -------------------------------------------------------------
+
+    # Gaussian response delay: mu/sigma tuned to mimic a modest embedded web
+    # server (mean ~300 ms, most responses between 80 ms and 520 ms).
+    _DELAY_MU    = 0.30
+    _DELAY_SIGMA = 0.11
+    _DELAY_MIN   = 0.05
+    _DELAY_MAX   = 0.80
+
+    _DELAY_MU_POST    = 0.80
+    _DELAY_SIGMA_POST = 0.20
+    _DELAY_MIN_POST   = 0.30
+    _DELAY_MAX_POST   = 2.50
+
+    async def _apply_delay(self, method: str = "GET"):
+        if method == "POST":
+            mu, sigma = self._DELAY_MU_POST, self._DELAY_SIGMA_POST
+            min_d, max_d = self._DELAY_MIN_POST, self._DELAY_MAX_POST
+        else:
+            mu, sigma = self._DELAY_MU, self._DELAY_SIGMA
+            min_d, max_d = self._DELAY_MIN, self._DELAY_MAX
+        delay = random.gauss(mu, sigma)
+        await asyncio.sleep(max(min_d, min(max_d, delay)))
+
+    # --- request handlers --------------------------------------------------
+
+    def _log_type(self, request):
+        """POST/PUT/PATCH or any request with an Authorization header -> login."""
+        if request.method in ("POST", "PUT", "PATCH"):
+            return self.logger.LOGIN
+        if request.headers.get("Authorization"):
+            return self.logger.LOGIN
+        return self.logger.QUERY
 
     async def handle_request(self, request):
         if not await self.check_auth(request):
             return await self.handle_error(request, 401)
 
-        full_url = str(request.url).split(request.base_url.netloc, 1)[1]
-        
-        method = request.method
-        endpoint_config = self.get_endpoint_config(full_url, method)
-        headers = {}
+        target = str(request.url).split(request.base_url.netloc, 1)[1]
+        endpoint_config = self.get_endpoint_config(target, request.method)
 
         if endpoint_config:
-            # Use configured response    
+            await self._apply_delay(request.method)
+            combined_headers = {**self.http_config.get('headers', {}),
+                                 **endpoint_config.get('headers', {})}
+            if self._is_not_modified(request, combined_headers):
+                return Response(content=b"", status_code=304,
+                                headers={k: v for k, v in combined_headers.items()
+                                         if k.lower() in ("etag", "cache-control", "last-modified")})
             content, status_code = await self.get_content(endpoint_config, request)
             status_code = endpoint_config.get('status_code', status_code)
-            headers = endpoint_config.get('headers', {})
-            if method == "POST":
-                await self.log(request, self.logger.LOGIN, status_code)
-            else:
-                await self.log(request, self.logger.QUERY, status_code)
-
+            headers = dict(endpoint_config.get('headers', {}))
+            await self._add_reason_header(headers, endpoint_config, request)
+            await self.log(request, self._log_type(request), status_code)
         else:
+            # only the default response is logged (inside handle_default)
             content, status_code, headers = await self.handle_static_file(request)
-            # only default response is logged
 
-        # Prepare response headers
         response_headers = self.http_config.get('headers', {}).copy()
         response_headers.update(headers)
+        return await self._make_response(content, status_code, response_headers, request)
 
-        # Determine content type, we cannot use both content_type variable and Content-Type in headers
-        content_type = response_headers.pop('Content-Type', 'text/html')
+    async def _render_request_headers(self, headers, request):
+        """Render per-request Jinja in header VALUES (e.g. a redirect
+        'Location: https://{{ request.host }}{{ request.path }}'). Deploy-time
+        vars are already resolved; only values still containing '{{' are
+        rendered, and request_info is built lazily at most once."""
+        info = None
+        rendered = {}
+        for key, value in headers.items():
+            if isinstance(value, str) and '{{' in value:
+                if info is None:
+                    info = await self.sanitize_request(request)
+                try:
+                    tmpl = self.env.from_string(value)
+                    tmpl.globals['request'] = info
+                    value = self._strip_ctl(tmpl.render())
+                except Exception:
+                    pass
+            rendered[key] = value
+        return rendered
 
-        return Response(content=content, media_type=content_type, status_code=status_code, headers=response_headers)
+    @staticmethod
+    def _cookie_name_from_set_cookie(value: str):
+        """Return the cookie name from a Set-Cookie header value, or None."""
+        first = value.split(';', 1)[0].strip()
+        if '=' in first:
+            return first.split('=', 1)[0].strip()
+        return None
+
+    async def _make_response(self, content, status_code, headers, request):
+        """Build a Response serving exactly the configured headers.
+
+        Content-Type is NOT inferred: some origins send no Content-Type, and a
+        faithful copy must reproduce that. We pass headers as-is and never pass
+        media_type, so Starlette adds a Content-Type only when the config
+        provides one. Static files set their own Content-Type (mimetypes) before
+        reaching here. The header name's case is restored by the middleware.
+
+        Set-Cookie headers are suppressed when the client already carries that
+        cookie, so repeated requests don't keep re-setting the same cookie.
+        """
+        headers = await self._render_request_headers(headers, request)
+        if request is not None:
+            client_cookies = request.cookies
+            headers = {
+                k: v for k, v in headers.items()
+                if not (
+                    k.lower() == 'set-cookie'
+                    and (name := self._cookie_name_from_set_cookie(v)) is not None
+                    and name in client_cookies
+                )
+            }
+        return Response(content=content, status_code=status_code, headers=headers)
 
     async def handle_static_file(self, request):
         if request.url.path.endswith('/'):
-            file_path = self.static_folder / request.url.path.lstrip('/') / 'index.html'
+            rel = request.url.path.lstrip('/') + 'index.html'
         elif request.method == 'GET':
-            file_path = self.static_folder / request.url.path.lstrip('/')
+            rel = request.url.path.lstrip('/')
         else:
             return await self.handle_default(request)
 
+        # Resolve BOTH sides and require strict containment so attacker-supplied
+        # paths (../, symlinks, encoded traversal, NUL bytes) cannot escape the
+        # skin's files/ directory (LFI). Anything outside falls through to the
+        # normal default response, so a probe looks like an ordinary 404.
+        static_root = self.static_folder.resolve()
         try:
-            if file_path.resolve().relative_to(self.static_folder) and file_path.is_file():
+            file_path = (static_root / rel).resolve()
+            file_path.relative_to(static_root)
+            if file_path.is_file():
                 content = file_path.read_bytes()
                 content_type = mimetypes.guess_type(str(file_path))[0] or 'application/octet-stream'
                 return content, 200, {'Content-Type': content_type}
-        except ValueError:
-            return "", 500, {}
+        except (ValueError, OSError):
+            pass
 
         return await self.handle_default(request)
 
     async def handle_default(self, request):
-        default_response = self.http_config.get('default')
-        content, _ = await self.get_content(default_response)
-        status_code = default_response.get('status_code', 404)
-        headers = default_response.get('headers', {})
-        await self.log(request, self.logger.QUERY, status_code)
+        await self._apply_delay(request.method)
+        config = self.http_config.get('default')
+        content, _ = await self.get_content(config, request)
+        status_code = config.get('status_code', 404)
+        headers = dict(config.get('headers', {}))
+        await self._add_reason_header(headers, config, request)
+        await self.log(request, self._log_type(request), status_code)
         return content, status_code, headers
-    
+
+    async def handle_error(self, request, error_code):
+        # Use the configured error response, else an {error_code}.html template.
+        errors = self.http_config.get('errors', {})
+        error_config = errors.get(str(error_code))
+        content, _ = await self.get_content(error_config or {"file": f"{error_code}.html"}, request)
+
+        headers = self.http_config.get('headers', {}).copy()
+        headers.update((error_config or {}).get('headers', {}))
+        if error_code == 401:
+            headers['WWW-Authenticate'] = 'Basic realm="Restricted Area"'
+        await self._add_reason_header(headers, error_config, request)
+
+        await self.log(request, self._log_type(request), error_code)
+        return await self._make_response(content, error_code, headers, request)
+
+    async def handle_unknown_method(self, request):
+        """Respond to non-standard HTTP methods (custom verbs like 'DEADZA')."""
+        config = self.http_config.get('unknown_method')
+        if not config:
+            return await self.handle_error(request, 405)
+
+        content, _ = await self.get_content(config, request)
+        status_code = config.get('status_code', 405)
+        headers = self.http_config.get('headers', {}).copy()
+        headers.update(config.get('headers', {}))
+        await self._add_reason_header(headers, config, request)
+
+        await self.log(request, self._log_type(request), status_code)
+        return await self._make_response(content, status_code, headers, request)
+
+    # --- auth / logging ----------------------------------------------------
+
+    async def check_auth(self, request):
+        if not self.BASIC_AUTH:
+            return True
+
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Basic '):
+            return False
+        try:
+            encoded_credentials = auth_header.split(' ', 1)[1]
+            username, password = base64.b64decode(encoded_credentials).decode('utf-8').split(':')
+            return username == self.USERNAME and password == self.PASSWORD
+        except Exception as e:
+            print(f"Error: {e}")
+            return False
+
     async def log(self, request, log_type, status_code, extra=None):
-        '''
-        Log the request to the logger and extract login and password from the request body, if any
-        The POST data is logged as hex string in the data field
-        The rest is processed and logged in the extra field
-        '''
+        """Log a request. For POST/PUT/PATCH, the body is stored and scanned for
+        common credential fields (form-encoded or XML/SOAP)."""
         src_ip, src_port = request.client.host, request.client.port
         dst_ip, dst_port = request.scope.get("server", ("unknown", "unknown"))
 
@@ -362,82 +583,137 @@ class HttpHandler:
             "target": str(request.url).split(request.base_url.netloc, 1)[1],
             "headers": dict(request.headers),
             "status_code": status_code,
-
             # Manually added because transport doesn't exist
             "src_ip": src_ip,
             "src_port": src_port,
             "dst_ip": dst_ip,
             "dst_port": dst_port,
         }
-
         all_extra.update(extra or {})
+
+        auth_header = request.headers.get("Authorization")
+        if auth_header:
+            scheme, _, token = auth_header.partition(" ")
+            all_extra["auth_scheme"] = scheme
+            if scheme.lower() == "basic" and token:
+                try:
+                    username, _, password = base64.b64decode(token).decode("utf-8").partition(":")
+                    all_extra["username"] = username
+                    all_extra["password"] = password
+                except Exception:
+                    all_extra["auth_token"] = token
+            elif token:
+                all_extra["auth_token"] = token
 
         data = ''
         if request.method in ["POST", "PUT", "PATCH"]:
             try:
                 body = await request.body()
-                
                 if body:
                     data = body
-                    form_data = body.decode('utf-8', errors='replace')
-                    all_extra['form'] = form_data
-                    
-                    query_direct = self.parse_query_string(form_data)
-                    for key, value in query_direct.items():
-                        if key in ['login', 'username','account', 'user%5Blogin%5D', 'j_username']:
-                            all_extra['username'] = value
-                        elif key in ['password', 'credential', 'passwd', 'user%5Bpassword%5D', 'j_password', 'secretkey']:
-                            all_extra['password'] = value
-                    
-                    # Handle XML/SOAP data
-                    if '<Envelope' in form_data and '</Envelope>' in form_data:
-                        if '<userName>' in form_data and '</userName>' in form_data:
-                            username_start = form_data.find('<userName>') + len('<userName>')
-                            username_end = form_data.find('</userName>')
-                            all_extra['username'] = form_data[username_start:username_end]
-                            
-                        if '<password>' in form_data and '</password>' in form_data:
-                            password_start = form_data.find('<password>') + len('<password>')
-                            password_end = form_data.find('</password>')
-                            all_extra['password'] = form_data[password_start:password_end]
-            
+                    all_extra.update(self._extract_credentials(body.decode('utf-8', errors='replace')))
             except ClientDisconnect:
                 pass
-        
+
         self.logger.log(f"{self.protocol_name}.{log_type}", request.client, data=data, extra=all_extra)
+
+    # Form fields commonly carrying credentials, by role.
+    _USERNAME_FIELDS = {'login', 'username', 'account', 'user%5Blogin%5D', 'j_username', 'ba_username'}
+    _PASSWORD_FIELDS = {'password', 'credential', 'passwd', 'user%5Bpassword%5D', 'j_password', 'secretkey', 'ba_password'}
+
+    def _extract_credentials(self, form_data):
+        """Pull username/password out of a POST body (form-encoded or XML/SOAP)."""
+        extra = {'form': form_data}
+
+        for key, value in self.parse_query_string(form_data).items():
+            if key in self._USERNAME_FIELDS:
+                extra['username'] = value
+            elif key in self._PASSWORD_FIELDS:
+                extra['password'] = value
+
+        if '<Envelope' in form_data and '</Envelope>' in form_data:
+            for tag, field in (('userName', 'username'), ('password', 'password')):
+                open_tag, close_tag = f'<{tag}>', f'</{tag}>'
+                if open_tag in form_data and close_tag in form_data:
+                    start = form_data.find(open_tag) + len(open_tag)
+                    extra[field] = form_data[start:form_data.find(close_tag)]
+
+        return extra
 
 
 class HeaderCapitalizationMiddleware:
-    """Custom ASGI middleware to preserve proper header capitalization"""
-    
+    """Set response header-name casing from the negotiated protocol and inject
+    the Date header (Hypercorn's own date/server headers are disabled).
+
+    Starlette lowercases all outgoing header names. Casing is then decided
+    purely by scope['http_version']:
+
+    - HTTP/2: names stay lowercase (required by the protocol); the synthetic
+      reason header is dropped (h2 has no reason phrase); 'date' is injected.
+    - HTTP/1.1: names are Title-Cased (the convention); 'Date' is injected; the
+      reason header is left in place for the hypercorn reason patch to consume.
+    """
+
+    # Standard headers whose canonical case isn't simple Title-Case.
+    _TITLE_EXCEPTIONS = {'etag': 'ETag', 'www-authenticate': 'WWW-Authenticate'}
+
     def __init__(self, app):
         self.app = app
-        # Only specify headers that don't follow standard title case
-        self.header_exceptions = {
-            'etag': 'ETag',
-            'www-authenticate': 'WWW-Authenticate',
-        }
+
+    def _title(self, lower):
+        return self._TITLE_EXCEPTIONS.get(lower, lower.title())
+
+    async def _handle_lifespan(self, receive, send):
+        # The honeypot app has no startup/shutdown logic. Handling the lifespan
+        # protocol here (instead of letting Starlette do it) avoids Hypercorn's
+        # noisy LifespanFailureError when the server task is cancelled on Ctrl+C.
+        while True:
+            try:
+                message = await receive()
+            except asyncio.CancelledError:
+                return
+            if message["type"] == "lifespan.startup":
+                await send({"type": "lifespan.startup.complete"})
+            elif message["type"] == "lifespan.shutdown":
+                await send({"type": "lifespan.shutdown.complete"})
+                return
 
     async def __call__(self, scope, receive, send):
+        if scope["type"] == "lifespan":
+            await self._handle_lifespan(receive, send)
+            return
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
+        is_h2 = scope.get("http_version") == "2"
+
         async def send_wrapper(message):
-            # Intercept the response headers and modify them to preserve capitalization
             if message["type"] == "http.response.start":
-                headers = []
-                for header_name, header_value in message.get("headers", []):
-                    name_str = header_name.decode("latin1").lower()
-                    value_str = header_value.decode("latin1")
-                    
-                    # Use exceptions for special cases, otherwise use title case
-                    proper_name = self.header_exceptions.get(name_str, header_name.decode("latin1").title())
-                    
-                    headers.append([proper_name.encode("latin1"), value_str.encode("latin1")])
-                
+                has_date = False
+                names = []  # lowercase name, value
+                for raw_name, raw_value in message.get("headers", []):
+                    lower = raw_name.decode("latin1").lower()
+                    if lower == _REASON_HEADER and is_h2:
+                        continue  # no reason phrase in HTTP/2
+                    if lower == "date":
+                        has_date = True
+                    names.append((lower, raw_value))
+
+                if is_h2:
+                    headers = [[lower.encode("latin1"), value] for lower, value in names]
+                    date_name = b"date"
+                else:
+                    headers = [[self._title(lower).encode("latin1"), value]
+                               for lower, value in names]
+                    date_name = b"Date"
+
+                if not has_date:
+                    date_val = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+                    headers.append([date_name, date_val.encode("latin1")])
+
                 message["headers"] = headers
-                
+
             await send(message)
 
         await self.app(scope, receive, send_wrapper)
@@ -451,63 +727,58 @@ class HttpHoneypot(BaseHoneypot):
         self.port = config['port']
         self.handler = HttpHandler(config=config, logger=logger)
         self.fastapi_app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-        self.app = None # will be set after route setup in start() method
+        self.app = None  # set after route setup in start()
         self.server = None
-        
-        # Add a middleware to handle custom methods
+
+        # FastAPI only routes standard methods; custom verbs are handled here.
         @self.fastapi_app.middleware("http")
         async def custom_method_middleware(request: Request, call_next):
-            # Standard HTTP methods that FastAPI handles by default
-            standard_methods = ["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE"]
-            
-            if request.method not in standard_methods:
-                # For custom methods, directly call the handler instead of going through FastAPI routing
-                return await self.handler.handle_error(request, 405)
-            
-            # For standard methods, continue with normal FastAPI processing
+            if request.method not in STANDARD_METHODS:
+                return await self.handler.handle_unknown_method(request)
             return await call_next(request)
 
-    async def start(self):
-        self.handler.setup()
-        
-        @self.fastapi_app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE"])
-        async def catch_all(request: Request, path: str):
-            return await self.handler.handle_request(request)
-        
-        # Wrap the FastAPI app with custom ASGI middleware for header capitalization
-        self.app = HeaderCapitalizationMiddleware(self.fastapi_app)
-        
-        return await super().start()
-    
-    async def _start_server(self):
-        config = uvicorn.Config(
-            app=self.app,
-            host=self.bindaddr,
-            port=self.port,
-            log_level="error",
-            access_log=False,
-            server_header=False
-        )
+    def _hypercorn_config(self):
+        """Base Hypercorn config shared by HTTP and HTTPS. Date and Server are
+        disabled here; the middleware injects Date (with protocol-correct case)
+        and Server comes from the skin's config headers."""
+        from hypercorn.config import Config as HyperConfig
+        config = HyperConfig()
+        config.bind = [f"{self.bindaddr}:{self.port}"]
+        config.include_server_header = False
+        config.include_date_header = False
+        config.accesslog = None
+        config.errorlog = None
+        return config
 
-        self.server = uvicorn.Server(config)
+    async def _serve_hypercorn(self, config):
+        from hypercorn.asyncio import serve as hyper_serve
         try:
-            await self.server.serve()
+            await hyper_serve(self.app, config,
+                              shutdown_trigger=self._shutdown_event.wait)
         except (OSError, SystemExit) as e:
             self._log_bind_error(e)
             return False
         except asyncio.CancelledError:
-            self.server.should_exit = True
-            # Only call shutdown if the server was actually started
-            if hasattr(self.server, 'servers'):
-                await self.server.shutdown()
+            self._shutdown_event.set()
             raise
 
+    async def start(self):
+        self.handler.setup()
+
+        @self.fastapi_app.api_route("/{path:path}", methods=list(STANDARD_METHODS))
+        async def catch_all(request: Request, path: str):
+            return await self.handler.handle_request(request)
+
+        self.app = HeaderCapitalizationMiddleware(self.fastapi_app)
+        self._shutdown_event = asyncio.Event()
+        return await super().start()
+
+    async def _start_server(self):
+        # Plaintext HTTP/1.1 (no ALPN). Hypercorn is used for both HTTP and
+        # HTTPS so there is a single server backend.
+        return await self._serve_hypercorn(self._hypercorn_config())
+
     async def stop(self):
-        if self.server:
-            # Signal the server to shut down
-            self.server.should_exit = True
-            # Only call shutdown if the server was actually started
-            if hasattr(self.server, 'servers'):
-                await self.server.shutdown()
-        
+        if getattr(self, '_shutdown_event', None) is not None:
+            self._shutdown_event.set()
         return await super().stop()
