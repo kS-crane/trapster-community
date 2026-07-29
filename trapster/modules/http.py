@@ -163,18 +163,29 @@ class HttpHandler:
     @staticmethod
     def make_etag_fn(deploy_seed, route_ref=None):
         """Build an etag() Jinja helper bound to a deploy seed.
+
+        Parameters (all optional):
+          weak, style ('iis'|'hash'), key, length, changenumber, fmt
         """
         if route_ref is None:
             route_ref = ['']
 
-        def etag(weak=False, style='iis', key=None):
+        def etag(weak=False, style='iis', key=None, length=None, changenumber=0, fmt=None):
             material = f"{deploy_seed}:{key if key is not None else route_ref[0]}"
             digest = hashlib.sha1(material.encode()).hexdigest()
-            if style == 'hash':
-                token = digest[:32]
+            default_len = 32 if style == 'hash' else 13
+            n = default_len if length is None else int(length)
+            n = max(1, min(n, len(digest)))
+            hexpart = digest[:n]
+
+            if fmt is not None:
+                token = str(fmt).format(hex=hexpart, n=changenumber, changenumber=changenumber)
+                value = token if '"' in token else f'"{token}"'
+            elif style == 'hash':
+                value = f'"{hexpart}"'
             else:
-                token = f'{digest[:13]}:0'
-            value = f'"{token}"'
+                value = f'"{hexpart}:{changenumber}"'
+
             if weak:
                 value = f'W/{value}'
             return value
