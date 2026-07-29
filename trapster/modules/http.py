@@ -160,6 +160,27 @@ class HttpHandler:
             "path_qs": str(request.url).split(request.base_url.netloc, 1)[1],
         }
 
+    @staticmethod
+    def make_etag_fn(deploy_seed, route_ref=None):
+        """Build an etag() Jinja helper bound to a deploy seed.
+        """
+        if route_ref is None:
+            route_ref = ['']
+
+        def etag(weak=False, style='iis', key=None):
+            material = f"{deploy_seed}:{key if key is not None else route_ref[0]}"
+            digest = hashlib.sha1(material.encode()).hexdigest()
+            if style == 'hash':
+                token = digest[:32]
+            else:
+                token = f'{digest[:13]}:0'
+            value = f'"{token}"'
+            if weak:
+                value = f'W/{value}'
+            return value
+
+        return etag
+
     def _resolve_deploy_config(self):
         """Evaluate Jinja expressions in config.yaml once at startup.
 
@@ -172,11 +193,14 @@ class HttpHandler:
         live as Jinja expressions instead of hardcoded strings.
         """
         deploy_seed = self.config.get('deploy_seed') or secrets.token_hex(8)
+        route_ref = ['']
 
         eval_env = ImmutableSandboxedEnvironment(autoescape=False)
         eval_env.globals['random'] = self.random_filter
         eval_env.globals['deploy_seed'] = deploy_seed
         eval_env.globals['md5'] = lambda s: hashlib.md5(str(s).encode()).hexdigest()
+        eval_env.globals['etag'] = self.make_etag_fn(deploy_seed, route_ref)
+        eval_env.globals['route'] = ''
 
         def evaluate(value):
             if isinstance(value, str) and ('{{' in value or '{%' in value):
@@ -207,7 +231,9 @@ class HttpHandler:
             self.http_config['headers'] = evaluate(self.http_config['headers'])
 
         for endpoint in self.http_config.get('endpoints', []):
-            for details in endpoint.values():
+            for route, details in endpoint.items():
+                route_ref[0] = route
+                eval_env.globals['route'] = route
                 if not isinstance(details, list):
                     details = [details]
                 for detail in details:
@@ -236,6 +262,8 @@ class HttpHandler:
             'get_current_time': lambda: datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT'),
             'uuid': lambda: str(uuid.uuid4()),
             'vars': self.http_config.get('vars', {}),
+            'etag': getattr(self, '_etag_fn', self.make_etag_fn(getattr(self, '_deploy_seed', ''))),
+            'deploy_seed': getattr(self, '_deploy_seed', ''),
         })
         env.filters['quote'] = lambda s: quote(str(s), safe='')
         env.undefined = Undefined
@@ -294,6 +322,12 @@ class HttpHandler:
 
     # --- content / response building ---------------------------------------
 
+    # Suffixes served as Jinja text templates from templates/.
+    _JINJA_FILE_SUFFIXES = frozenset({
+        '.html', '.htm', '.css', '.js', '.json', '.xml', '.txt', '.svg',
+        '.csv', '.md', '.map',
+    })
+
     async def get_content(self, endpoint_config, request=None):
         if not endpoint_config:
             return "", 200
@@ -306,12 +340,18 @@ class HttpHandler:
             try:
                 # Guard against path traversal outside the template folder.
                 file_path.relative_to(self.template_folder.resolve())
+                if not file_path.is_file():
+                    raise FileNotFoundError(file_path)
+                status = int(endpoint_config.get('status_code', 200))
+                # Binary assets (fonts, icons, …) — raw bytes, no Jinja.
+                if file_path.suffix.lower() not in self._JINJA_FILE_SUFFIXES:
+                    return file_path.read_bytes(), status
                 raw_content = file_path.read_text()
                 template = self.env.from_string(raw_content)
                 template.globals['request'] = await self.sanitize_request(request)
                 metadata, body = self.parse_front_matter(template.render())
-                return body, int(metadata.get('status_code', 200))
-            except (ValueError, FileNotFoundError) as e:
+                return body, int(metadata.get('status_code', status))
+            except (ValueError, FileNotFoundError, UnicodeDecodeError) as e:
                 print(f"Error: {e}")
 
         elif 'ai' in endpoint_config:
@@ -501,13 +541,15 @@ class HttpHandler:
         # paths (../, symlinks, encoded traversal, NUL bytes) cannot escape the
         # skin's files/ directory (LFI). Anything outside falls through to the
         # normal default response, so a probe looks like an ordinary 404.
-        static_root = self.static_folder.resolve()
         try:
-            file_path = (static_root / rel).resolve()
-            file_path.relative_to(static_root)
+            static_root = self.static_folder.resolve()
+            base = self.static_folder.resolve()
+            file_path = (self.static_folder / rel).resolve()
+            file_path.relative_to(base)
             if file_path.is_file():
                 content = file_path.read_bytes()
-                content_type = mimetypes.guess_type(str(file_path))[0] or 'application/octet-stream'
+                content_type = (mimetypes.guess_type(str(file_path))[0]
+                                or 'application/octet-stream')
                 return content, 200, {'Content-Type': content_type}
         except (ValueError, OSError):
             pass
