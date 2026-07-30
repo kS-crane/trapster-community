@@ -581,6 +581,7 @@ class HttpHandler:
             "skin": self.NAME,
             "method": request.method,
             "target": str(request.url).split(request.base_url.netloc, 1)[1],
+            "version": request.scope.get("http_version"),
             "headers": dict(request.headers),
             "status_code": status_code,
             # Manually added because transport doesn't exist
