@@ -420,6 +420,7 @@ class HttpHandler:
             combined_headers = {**self.http_config.get('headers', {}),
                                  **endpoint_config.get('headers', {})}
             if self._is_not_modified(request, combined_headers):
+                await self.log(request, self._log_type(request), 304)
                 return Response(content=b"", status_code=304,
                                 headers={k: v for k, v in combined_headers.items()
                                          if k.lower() in ("etag", "cache-control", "last-modified")})
