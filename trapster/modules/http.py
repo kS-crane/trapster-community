@@ -471,6 +471,7 @@ class HttpHandler:
             combined_headers = {**self.http_config.get('headers', {}),
                                  **endpoint_config.get('headers', {})}
             if self._is_not_modified(request, combined_headers):
+                await self.log(request, self._log_type(request), 304)
                 return Response(content=b"", status_code=304,
                                 headers={k: v for k, v in combined_headers.items()
                                          if k.lower() in ("etag", "cache-control", "last-modified")})
@@ -634,6 +635,7 @@ class HttpHandler:
             "skin": self.NAME,
             "method": request.method,
             "target": str(request.url).split(request.base_url.netloc, 1)[1],
+            "version": request.scope.get("http_version"),
             "headers": dict(request.headers),
             "status_code": status_code,
             # Manually added because transport doesn't exist
