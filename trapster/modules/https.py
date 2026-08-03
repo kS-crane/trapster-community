@@ -59,11 +59,12 @@ class HttpsHoneypot(HttpHoneypot):
 
     def generate_certificate(self):
         '''
-        Regenerate the certificate at each startup to ensure the configuration values are applied and reflected.
+        Use the configured key/certificate files when both already exist.
+        Otherwise generate a self-signed pair (and write it to those paths).
         '''
-        #if self.certificate_path.exists() and self.key_path.exists():
-        #    return
-        #else:
+        if self.certificate_path.is_file() and self.key_path.is_file():
+            return
+
         self.key_path.parent.mkdir(parents=True, exist_ok=True)
         self.certificate_path.parent.mkdir(parents=True, exist_ok=True)
 
