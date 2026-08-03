@@ -24,6 +24,8 @@ class HttpsHoneypot(HttpHoneypot):
     def __init__(self, config, logger, bindaddr="0.0.0.0"):
         super().__init__(config, logger, bindaddr)
         self.handler = HttpsHandler(config=config, logger=logger)
+        # Check if the user has set the TLS key and certificate
+        self.user_set_tls = config.get("key") and config.get("certificate")
         config.setdefault("country_name", None)
         config.setdefault("state_or_province_name", None)
         config.setdefault("locality_name", None)
@@ -62,8 +64,11 @@ class HttpsHoneypot(HttpHoneypot):
         Use the configured key/certificate files when both already exist.
         Otherwise generate a self-signed pair (and write it to those paths).
         '''
-        if self.certificate_path.is_file() and self.key_path.is_file():
-            return
+        if self.user_set_tls:
+            if self.certificate_path.is_file() and self.key_path.is_file():
+                return
+            else:
+                raise ValueError(f"HTTPS key/certificate configured but missing: key={self.key_path} certificate={self.certificate_path}")
 
         self.key_path.parent.mkdir(parents=True, exist_ok=True)
         self.certificate_path.parent.mkdir(parents=True, exist_ok=True)
