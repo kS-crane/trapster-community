@@ -1,15 +1,36 @@
 name: demo_api
-description: Learn how to create your own config file for the HTTP server
+description: Reference config demonstrating every capability of the HTTP honeypot framework
 
 # templates folder will be used to render the response using jinja2 templating
 # templates correspond to 'endpoints' that you defined in the 'endpoints' section
-# files folder will be used to serve static files
+# files folder will be used to serve static files (see files/status.txt, served
+# automatically at /status.txt since no endpoint below matches that path)
 
-# headers here are optional, and will be added to all responses
+# http_version: "2" advertises HTTP/2 over ALPN. This only has an effect when
+# this skin is served by the https service (plain http is always 1.1, since h2
+# without TLS needs a separate upgrade mechanism this framework doesn't
+# implement). Clients that don't negotiate h2 transparently get http/1.1.
+http_version: "2"
+
+# vars are Jinja expressions resolved ONCE at process startup, against a
+# random deploy_seed that's stable for this process's lifetime and unique per
+# deployment. Later vars can reference earlier ones via {{ vars.x }}, so
+# derived values (e.g. a token built from another var) are possible. Only
+# `random`, `md5`, `etag`, `route` and `deploy_seed` are available here (not
+# `uuid`, which is per-request only, see login.j2).
+vars:
+  server_id: "{{ etag(style='hash', key='server_id', length=16) }}"
+  instance_token: "{{ md5(vars.server_id) }}"
+
+# headers here are optional, and are merged into every response.
+# Values containing Jinja are resolved once at startup (like `vars` above)
+# UNLESS they reference `request`, in which case they're rendered fresh on
+# every request instead (see the Location header on /redirect below).
 headers:
   Content-Type: text/html; charset=utf-8
   Server: nginx
   X-Powered-By: PHP/7.4.3
+  X-Instance-Id: "{{ vars.server_id }}"
 
 # endpoints are matched in order, and the first one that matches is used
 endpoints:
@@ -21,31 +42,116 @@ endpoints:
   - "/robots.txt":
     - method: GET
       status_code: 200
-      # you can serve content from a file, or directly here as a string
-      content: | 
+      # you can serve content from a file, or directly here as a string.
+      # inline content is resolved once at startup like `headers` above, so
+      # it can use {{ vars.x }} but not {{ request... }} or {{ uuid() }}.
+      content: |
         User-agent: *
         Disallow: /
-      # you can also add headers to the response
       headers:
         Content-Type: text/plain
 
-  - '/api/v1/settings':
-    - method: POST # the status_code of the respond is dynamic and present in the jinja2 template
-      file: settings.j2 # file use jinja2 templating to create dynamic content
+  - "/api/v1/settings":
+    - method: POST # the status_code of the response is dynamic, set from within settings.j2
+      file: settings.j2 # file uses jinja2 templating to create dynamic content
       headers:
         Content-Type: application/json
 
-  # you can use regex to match the path
-  - '/api/v1/user': 
+  - "/api/v1/login":
+    - method: POST
+      # request.form parses application/x-www-form-urlencoded bodies (e.g. a
+      # login form's username/password), so fields can be reflected back.
+      file: login.j2
+      # reason is rendered per-request (it can use {{ request.* }} just like
+      # a file: template), letting the reason phrase follow the outcome.
+      reason: "{{ 'Login OK' if request.form.get('username') == 'admin' and request.form.get('password') == 'admin123' else 'Access Denied' }}"
+      headers:
+        Content-Type: application/json
+
+  # you can use regex to match the path, and `query` to match query params
+  - "/api/v1/user":
     - method: GET
       query:
-        id: '([0-9]+)' #match digits 1-10 in the URL, like : /api/v1/user?id=1
+        id: '([0-9]+)' # match digits in the URL, like /api/v1/user?id=1
       status_code: 200
-      file: user.j2 # file use jinja2 templating to create dynamic content
+      file: user.j2
       headers:
         Content-Type: application/json
 
-# if no endpoint matches, the default one is used
+  - "/api/v1/search":
+    - method: GET
+      # the `quote` filter URL-encodes attacker-controlled input before it's
+      # reflected into a URL, preventing header/response injection.
+      file: search.j2
+      headers:
+        Content-Type: application/json
+
+  - "/redirect":
+    - method: GET
+      status_code: 302
+      content: ""
+      headers:
+        # this value mentions `request`, so it's rendered fresh on every
+        # request instead of being frozen at startup like X-Instance-Id above.
+        Location: "https://{{ request.host }}/api/v1/user?id=1"
+
+  - "/files/report.pdf":
+    - method: GET
+      status_code: 200
+      content: "%PDF-1.4 demo file"
+      headers:
+        Content-Type: application/pdf
+        # a fingerprint-prone value (an ETag) computed from the deploy_seed:
+        # identical on every request to this instance, unique on another
+        # deployment. style='iis' -> "<hex>:<changenumber>", matching how
+        # IIS formats static-file ETags.
+        ETag: "{{ etag(style='iis', changenumber=3) }}"
+        Cache-Control: public, max-age=3600
+      # try requesting this twice: the second request's If-None-Match will
+      # match the ETag above and the framework replies 304 automatically.
+
+  - "/api/v1/export.csv":
+    - method: GET
+      status_code: 200
+      content: "id,name\n1,demo"
+      headers:
+        Content-Type: text/csv
+        # style='hash' -> a plain quoted hex digest; weak=True -> prefixed W/
+        ETag: "{{ etag(style='hash', weak=True) }}"
+
+  - "/api/v1/health":
+    - method: GET
+      status_code: 200
+      content: '{"status": "ok"}'
+      # a custom, non-standard reason phrase for an otherwise ordinary 200.
+      reason: "Superb"
+      headers:
+        Content-Type: application/json
+
+# if no endpoint above matches: static files under files/ are tried first
+# (e.g. GET /status.txt), then this default response.
 default:
   status_code: 404
   file: 404.html
+  reason: "Not Found"
+
+# errors are used by the framework's own auth handling: this 401 only fires
+# if this skin's honeypot instance is deployed with basic_auth: true plus a
+# username/password (that's set on the instance, not here in config.yaml),
+# and the client's credentials don't match.
+errors:
+  "401":
+    content: '{"error": "unauthorized"}'
+    reason: "Access Denied"
+    headers:
+      Content-Type: application/json
+
+# unknown_method handles verbs FastAPI doesn't route natively - WebDAV verbs,
+# scanner probes like PROPFIND/TRACK/DEBUG, etc. Without this entry, those
+# fall back to a generic 405 response instead.
+unknown_method:
+  status_code: 501
+  content: '{"error": "not implemented"}'
+  reason: "Method Not Understood"
+  headers:
+    Content-Type: application/json

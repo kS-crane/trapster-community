@@ -209,7 +209,17 @@ And also:
 The HTTP module can emulate any website. It works with YAML configuration files to match requests using regular expressions, and can generate responses using either a template or an AI model.
 
 The configuration are stored in [trapster/data/http](trapster/data/http), each folder represent a website.
-An example of the functionnalities can be found at [trapster/data/http/demo_api/config.yaml](trapster/data/http/demo_api/config.yaml)
+
+`demo_api` ([trapster/data/http/demo_api](trapster/data/http/demo_api)) is a reference skin: every entry in its `config.yaml`
+and template exists specifically to demonstrate one capability of the HTTP engine, so it's the
+place to look when writing your own. It shows, among others:
+
+- **`http_version: "2"`**: advertise HTTP/2 over ALPN (only takes effect when the skin is served over HTTPS).
+- **Custom reason phrases**: override the HTTP/1.1 status line's reason (`reason:`), either a fixed string or a per-request Jinja expression.
+- **ETags & conditional GET**: `etag()` generates IIS-style or hashed ETags from a per-deployment seed; a matching `If-None-Match` on a later request gets an automatic `304`.
+- **Deploy-time `vars`**: values resolved once at startup from a random per-deployment seed, so they're identical across every request but unique per deployment.
+- **Per-request templating**: `.j2` files re-render on every request (`request.form`, `request.query_string`, `uuid()`, `quote` filter, etc.), while inline `content`/`headers` are frozen at startup unless they reference `request`.
+- **Static file serving, regex path/query matching, `default`/`errors`/`unknown_method` fallbacks.**
 
 **Structure:**
 - config.yaml: contains the configuration for the website.
@@ -267,6 +277,15 @@ If someone tries to login, you will get a log like this one:
 
 ## AI support
 
+> **Disclaimer:** AI-generated responses are not a substitute for intrusion detection. A
+> motivated attacker can fingerprint them (latency, inconsistent state across requests, subtle
+> phrasing) with a handful of probes, so this feature should not be relied on in a defensive or
+> production deployment. It's intended for external CTI research, observing attacker tooling and
+> behavior against a permissive AI-driven backend, not as a hardened detection control.
+
+<details>
+<summary>Show AI support details</summary>
+
 To use AI, install the dependencies:
 ```bash
 pip install trapster[ai]
@@ -323,6 +342,8 @@ For example, this image show a request to capture SQLi attempts. Only the SQLi a
 <img src="images/sqli_ai_response_1.png" width="60%">
 
 A full example is available in `trapster/data/demo_ai`
+
+</details>
 
 ## Contributing
 

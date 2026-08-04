@@ -1,0 +1,5 @@
+{% set q = request.query_string.get('q', '') %}
+{
+  "query": "{{ q }}",
+  "results_url": "/api/v1/search/results?q={{ q | quote }}"
+}
