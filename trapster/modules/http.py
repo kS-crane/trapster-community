@@ -17,12 +17,18 @@ mimetypes.add_type('image/x-icon', '.ico')
 
 from trapster.modules.base import BaseHoneypot
 
-# Synthetic header carrying a custom HTTP/1.1 reason phrase from the handler.
-# The reason patch consumes it; the middleware strips it on HTTP/2 (no reason).
-_REASON_HEADER = "x-trap-reason"
+# Carries a custom HTTP/1.1 reason phrase from the handler to the hypercorn
+# reason patch below, via the ASGI `state` extension (request.state / scope
+# ["state"]). Not a contextvar: FastAPI's @app.middleware("http") decorator
+# (see custom_method_middleware) runs the actual endpoint in a child task
+# spawned by Starlette's BaseHTTPMiddleware, and a contextvar set there is
+# invisible to the outer task that hands the response to hypercorn. The ASGI
+# scope dict, in contrast, is the same object shared across that task split,
+# so mutating scope["state"] is visible wherever the scope is threaded next.
+_REASON_STATE_KEY = "custom_http_reason"
 
 # HTTP methods FastAPI routes natively; anything else is a "custom" method.
-STANDARD_METHODS = {"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE"}
+STANDARD_METHODS = {"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE", "QUERY"}
 
 
 def _patch_hypercorn_reason():
@@ -30,9 +36,11 @@ def _patch_hypercorn_reason():
 
     Hypercorn builds an h11.Response without a reason, so h11 derives the
     standard phrase from the status code. We wrap _send_h11_event so that, when
-    the response carries the synthetic reason header, the h11.Response is
-    rebuilt with that reason (and the header removed). HTTP/2 has no reason
-    phrase, so this only affects h11 connections.
+    the current stream's ASGI scope carries a reason (see _REASON_STATE_KEY),
+    the h11.Response is rebuilt with that reason. HTTP/2 has no reason phrase,
+    so this only affects h11 connections; if this patch fails to apply (e.g. a
+    future hypercorn version reshapes H11Protocol), requests simply get the
+    standard reason phrase instead of the configured one.
     """
     try:
         from hypercorn.protocol import h11 as hyper_h11
@@ -40,24 +48,18 @@ def _patch_hypercorn_reason():
     except Exception:
         return
 
-    reason_header = _REASON_HEADER.encode("latin1")
     original = hyper_h11.H11Protocol._send_h11_event
 
     async def _send_h11_event(self, event):
         if isinstance(event, h11lib.Response):
-            reason = None
-            headers = []
-            for name, value in event.headers:
-                if bytes(name).lower() == reason_header:
-                    reason = bytes(value)
-                else:
-                    headers.append((name, value))
+            scope = getattr(self.stream, "scope", None) if self.stream is not None else None
+            reason = scope.get("state", {}).get(_REASON_STATE_KEY) if scope is not None else None
             if reason is not None:
                 event = h11lib.Response(
                     status_code=event.status_code,
-                    headers=headers,
+                    headers=event.headers,
                     http_version=event.http_version,
-                    reason=reason,
+                    reason=reason.encode("latin1"),
                 )
         return await original(self, event)
 
@@ -253,6 +255,11 @@ class HttpHandler:
                     if 'content' in detail:
                         detail['content'] = evaluate(detail['content'])
 
+        # Reused by create_jinja_env() so per-request templates get the same
+        # deploy_seed / etag() as the deploy-time headers/content evaluated above.
+        self._deploy_seed = deploy_seed
+        self._etag_fn = self.make_etag_fn(deploy_seed)
+
     @staticmethod
     def random_filter(seed=None, alphabet=string.hexdigits[:-6], length=36):
         """Jinja helper generating a (optionally seeded) random string."""
@@ -336,7 +343,7 @@ class HttpHandler:
     # Suffixes served as Jinja text templates from templates/.
     _JINJA_FILE_SUFFIXES = frozenset({
         '.html', '.htm', '.css', '.js', '.json', '.xml', '.txt', '.svg',
-        '.csv', '.md', '.map',
+        '.csv', '.md', '.map', '.j2',
     })
 
     async def get_content(self, endpoint_config, request=None):
@@ -419,11 +426,11 @@ class HttpHandler:
         except Exception:
             return None
 
-    async def _add_reason_header(self, headers, config, request):
-        """Attach the custom reason phrase (if any) as the synthetic header."""
+    async def _set_reason(self, config, request):
+        """Stash the custom reason phrase (if any) for the hypercorn patch to pick up."""
         reason = self._render_reason(config, await self.sanitize_request(request))
         if reason:
-            headers[_REASON_HEADER] = reason
+            request.scope.setdefault("state", {})[_REASON_STATE_KEY] = reason
 
     # --- delay -------------------------------------------------------------
 
@@ -478,7 +485,7 @@ class HttpHandler:
             content, status_code = await self.get_content(endpoint_config, request)
             status_code = endpoint_config.get('status_code', status_code)
             headers = dict(endpoint_config.get('headers', {}))
-            await self._add_reason_header(headers, endpoint_config, request)
+            await self._set_reason(endpoint_config, request)
             await self.log(request, self._log_type(request), status_code)
         else:
             # only the default response is logged (inside handle_default)
@@ -574,7 +581,7 @@ class HttpHandler:
         content, _ = await self.get_content(config, request)
         status_code = config.get('status_code', 404)
         headers = dict(config.get('headers', {}))
-        await self._add_reason_header(headers, config, request)
+        await self._set_reason(config, request)
         await self.log(request, self._log_type(request), status_code)
         return content, status_code, headers
 
@@ -588,7 +595,7 @@ class HttpHandler:
         headers.update((error_config or {}).get('headers', {}))
         if error_code == 401:
             headers['WWW-Authenticate'] = 'Basic realm="Restricted Area"'
-        await self._add_reason_header(headers, error_config, request)
+        await self._set_reason(error_config, request)
 
         await self.log(request, self._log_type(request), error_code)
         return await self._make_response(content, error_code, headers, request)
@@ -603,7 +610,7 @@ class HttpHandler:
         status_code = config.get('status_code', 405)
         headers = self.http_config.get('headers', {}).copy()
         headers.update(config.get('headers', {}))
-        await self._add_reason_header(headers, config, request)
+        await self._set_reason(config, request)
 
         await self.log(request, self._log_type(request), status_code)
         return await self._make_response(content, status_code, headers, request)
@@ -703,10 +710,8 @@ class HeaderCapitalizationMiddleware:
     Starlette lowercases all outgoing header names. Casing is then decided
     purely by scope['http_version']:
 
-    - HTTP/2: names stay lowercase (required by the protocol); the synthetic
-      reason header is dropped (h2 has no reason phrase); 'date' is injected.
-    - HTTP/1.1: names are Title-Cased (the convention); 'Date' is injected; the
-      reason header is left in place for the hypercorn reason patch to consume.
+    - HTTP/2: names stay lowercase (required by the protocol); 'date' is injected.
+    - HTTP/1.1: names are Title-Cased (the convention); 'Date' is injected.
     """
 
     # Standard headers whose canonical case isn't simple Title-Case.
@@ -749,8 +754,6 @@ class HeaderCapitalizationMiddleware:
                 names = []  # lowercase name, value
                 for raw_name, raw_value in message.get("headers", []):
                     lower = raw_name.decode("latin1").lower()
-                    if lower == _REASON_HEADER and is_h2:
-                        continue  # no reason phrase in HTTP/2
                     if lower == "date":
                         has_date = True
                     names.append((lower, raw_value))

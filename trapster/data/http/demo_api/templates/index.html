@@ -1,19 +1,41 @@
 <html>
 <head>
-    <link href="/dist/tailwind.min.css" rel="stylesheet">
+    <style>
+        body { font-family: sans-serif; max-width: 46rem; margin: 2rem auto; padding: 0 1rem; }
+        code { background: #eee; padding: 0.1rem 0.3rem; }
+        li { margin-bottom: 0.4rem; }
+    </style>
 </head>
-<body class="p-4">
-    <h1 class="text-2xl font-bold">Demo API</h1>
+<body>
+    <h1>Demo API</h1>
+    <p>This skin is a reference config: every entry in its <code>config.yaml</code>
+    exists to demonstrate one capability of the HTTP honeypot framework.</p>
 
-    <div class="p-4">
-        <p>This is a demo API server. </p>
-        <p>Your API key is: {{ random(seed=(request.remote_addr|string)) }}</p>
-        <p>The current time is: {{ get_current_time() }}</p>
-    </div>
+    <p>
+        Your client IP is: {{ request.remote }}<br>
+        The current time is: {{ get_current_time() }}<br>
+        This deployment's instance id (stable for this process, unique per
+        deployment, see <code>vars</code> in config.yaml): {{ vars.server_id }}
+    </p>
 
-    <p class="pt-4"><strong>Get Users information</strong></p>
+    <h2>Try it</h2>
     <ul>
-    {% for i in range(1, 11) %}
+        <li><code>GET /robots.txt</code> - static inline content</li>
+        <li><code>GET /status.txt</code> - served from <code>files/</code>, no matching endpoint needed</li>
+        <li><code>GET /api/v1/user?id=1</code> - regex path + query-param matching</li>
+        <li><code>GET /api/v1/search?q=hello</code> - the <code>quote</code> filter escaping reflected input</li>
+        <li><code>GET /redirect</code> - a <code>Location</code> header rendered per-request</li>
+        <li><code>GET /api/v1/health</code> - a custom HTTP/1.1 reason phrase ("Superb" instead of "OK")</li>
+        <li><code>GET /files/report.pdf</code> twice - the second request gets a 304, matched against the ETag from the first</li>
+        <li><code>GET /api/v1/export.csv</code> - a weak, hash-style ETag</li>
+        <li><code>POST /api/v1/login</code> with <code>username=admin&amp;password=admin123</code> - form parsing, a per-request token via <code>uuid()</code>, and a reason phrase that follows the outcome</li>
+        <li><code>POST /api/v1/settings</code> with body containing <code>settings</code> - a template overriding its own status code</li>
+        <li>Any WebDAV-style verb (e.g. <code>PROPFIND</code>) - handled by <code>unknown_method</code></li>
+    </ul>
+
+    <p>For users:</p>
+    <ul>
+    {% for i in range(1, 4) %}
         <li><a href="/api/v1/user?id={{ i }}">User {{ i }}</a></li>
     {% endfor %}
     </ul>

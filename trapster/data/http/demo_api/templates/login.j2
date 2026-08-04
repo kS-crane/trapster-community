@@ -1,0 +1,16 @@
+{#- request.form holds parsed application/x-www-form-urlencoded fields -#}
+{%- set username = request.form.get('username', '') -%}
+{%- set password = request.form.get('password', '') -%}
+{#- uuid() is per-request (unlike the deploy-time vars.* values), so every
+    successful login gets a fresh, unique session token -#}
+{%- if username == 'admin' and password == 'admin123' -%}
+---
+status_code: 200
+---
+{"token": "{{ uuid() }}"}
+{%- else -%}
+---
+status_code: 401
+---
+{"error": "invalid credentials"}
+{%- endif %}
