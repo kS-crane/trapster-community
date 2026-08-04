@@ -190,6 +190,7 @@ class EcsFormatter:
 
         if protocol in {"http", "https"}:
             ecs_event["http"] = {
+                "version": extra.get("version"),
                 "request": {
                     "method": extra.get("method"),
                     "headers": extra.get("headers"),

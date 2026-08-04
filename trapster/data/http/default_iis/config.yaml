@@ -2,6 +2,7 @@ name: default_iis
 description: Default IIS server
 headers:
   Server: Microsoft-IIS/10.0
+  Content-Type: text/html; charset=utf-8
 
 endpoints:
   - "/":

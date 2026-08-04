@@ -2,6 +2,7 @@ name: default_apache
 description: Default Apache server
 headers:
   Server: Apache/2.4.41 (Ubuntu)
+  Content-Type: text/html; charset=utf-8
 
 endpoints:
   - "/":

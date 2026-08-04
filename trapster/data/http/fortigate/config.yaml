@@ -1,6 +1,7 @@
 name: fortigate
 description: Fortigate honeypot
 headers:
+  Content-Type: text/html; charset=utf-8
   X-Frame-Options: SAMEORIGIN
   Content-Security-Policy: frame-ancestors 'self'
   X-Xss-Protection: 1; mode=block

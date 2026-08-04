@@ -1,8 +1,6 @@
 from trapster.modules.http import HttpHandler, HttpHoneypot, HeaderCapitalizationMiddleware
 
-import ssl
 import asyncio
-import uvicorn
 from fastapi import Request
 from pathlib import Path
 import datetime
@@ -13,9 +11,6 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 
-from pathlib import Path
-import ssl
-import datetime
 
 class HttpsHandler(HttpHandler):
     def __init__(self, config=None, logger=None):
@@ -29,6 +24,8 @@ class HttpsHoneypot(HttpHoneypot):
     def __init__(self, config, logger, bindaddr="0.0.0.0"):
         super().__init__(config, logger, bindaddr)
         self.handler = HttpsHandler(config=config, logger=logger)
+        # Check if the user has set the TLS key and certificate
+        self.user_set_tls = config.get("key") and config.get("certificate")
         config.setdefault("country_name", None)
         config.setdefault("state_or_province_name", None)
         config.setdefault("locality_name", None)
@@ -36,66 +33,43 @@ class HttpsHoneypot(HttpHoneypot):
         config.setdefault("common_name", "server.internal")
         config.setdefault("key", "trapster/data/ssl/https/key.pem")
         config.setdefault("certificate", "trapster/data/ssl/https/certificate.pem")
+        config.setdefault("not_valid_before", None)
+        config.setdefault("not_valid_after", None)
 
         self.COUNTRY_NAME = config.get("country_name") or None
         self.STATE_OR_PROVINCE_NAME = config.get("state_or_province_name") or None
         self.LOCALITY_NAME = config.get("locality_name") or None
         self.ORGANIZATION_NAME = config.get("organization_name") or None
         self.COMMON_NAME = config.get("common_name")
+        self.NOT_VALID_BEFORE = config.get("not_valid_before")
+        self.NOT_VALID_AFTER = config.get("not_valid_after")
         
         self.key_path = Path(config.get("key"))
         self.certificate_path = Path(config.get("certificate"))
 
         self.generate_certificate()
     
-    async def start(self):
-        self.handler.setup()
-        
-        @self.fastapi_app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE"])
-        async def catch_all(request: Request, path: str):
-            return await self.handler.handle_request(request)
-        
-        # Now wrap the FastAPI app with custom ASGI middleware for header capitalization
-        self.app = HeaderCapitalizationMiddleware(self.fastapi_app)
-        
-        # Start the server in a background task
-        loop = asyncio.get_running_loop()
-        self.task = loop.create_task(self._start_server())
-        return self.task
-    
     async def _start_server(self):
-        ssl_context = ssl.create_default_context(purpose=ssl.Purpose.CLIENT_AUTH)
-        ssl_context.load_cert_chain(certfile=self.certificate_path, keyfile=self.key_path)
-        
-        config = uvicorn.Config(
-            app=self.app,
-            host=self.bindaddr,
-            port=self.port,
-            log_level="error",
-            access_log=False,
-            server_header=False,
-            ssl_keyfile=str(self.key_path),
-            ssl_certfile=str(self.certificate_path)
-        )
-        self.server = uvicorn.Server(config)
-        try:
-            await self.server.serve()
-        except (OSError, SystemExit) as e:
-            self._log_bind_error(e)
-            return False
-        except asyncio.CancelledError:
-            self.server.should_exit = True
-            if hasattr(self.server, 'servers'):
-                await self.server.shutdown()
-            raise
+        # TLS via Hypercorn. http_version: "2" enables ALPN h2 (falling back to
+        # http/1.1); otherwise http/1.1 only. The per-request middleware adapts
+        # casing/Date to whichever protocol the client negotiates.
+        config = self._hypercorn_config()
+        config.certfile = str(self.certificate_path)
+        config.keyfile = str(self.key_path)
+        config.alpn_protocols = ["h2", "http/1.1"] if self.handler.http2 else ["http/1.1"]
+        return await self._serve_hypercorn(config)
 
     def generate_certificate(self):
         '''
-        Regenerate the certificate at each startup to ensure the configuration values are applied and reflected.
+        Use the configured key/certificate files when both already exist.
+        Otherwise generate a self-signed pair (and write it to those paths).
         '''
-        #if self.certificate_path.exists() and self.key_path.exists():
-        #    return
-        #else:
+        if self.user_set_tls:
+            if self.certificate_path.is_file() and self.key_path.is_file():
+                return
+            else:
+                raise ValueError(f"HTTPS key/certificate configured but missing: key={self.key_path} certificate={self.certificate_path}")
+
         self.key_path.parent.mkdir(parents=True, exist_ok=True)
         self.certificate_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -128,8 +102,8 @@ class HttpsHoneypot(HttpHoneypot):
             .issuer_name(issuer)
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.datetime.now())
-            .not_valid_after(datetime.datetime.now() + datetime.timedelta(days=3650))
+            .not_valid_before(datetime.datetime.fromisoformat(self.NOT_VALID_BEFORE) if self.NOT_VALID_BEFORE else datetime.datetime.now())
+            .not_valid_after(datetime.datetime.fromisoformat(self.NOT_VALID_AFTER) if self.NOT_VALID_AFTER else datetime.datetime.now() + datetime.timedelta(days=3650))
             .add_extension(alt_names, False)
             .sign(key, hashes.SHA256(), default_backend())
         )

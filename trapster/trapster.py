@@ -2,6 +2,7 @@ import asyncio
 import psutil
 import argparse, json, socket, os
 import logging
+import ssl
 
 from . import __version__
 from .modules import *
@@ -27,7 +28,13 @@ class TrapsterManager:
         logging.warning(f"Interface {config_interface} does not exist, using 0.0.0.0")
         return "0.0.0.0"
 
-    async def start(self):    
+    async def start(self):
+        # A honeypot constantly gets malformed/aborted TLS from scanners; those
+        # surface as loop-level ssl.SSLError noise. Drop them, keep everything else.
+        asyncio.get_running_loop().set_exception_handler(
+            lambda loop, ctx: None if isinstance(ctx.get("exception"), ssl.SSLError)
+            else loop.default_exception_handler(ctx)
+        )
         ip = self.get_ip(self.config.get('interface', None))
 
         global_vars = {k: self.config[k] for k in ('hostname', 'domain') if k in self.config}
