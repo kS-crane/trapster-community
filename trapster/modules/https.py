@@ -12,6 +12,11 @@ from cryptography import x509
 from cryptography.x509.oid import NameOID
 
 
+def _has_content(path):
+    """True when *path* is an existing file with data (empty files don't count)."""
+    return path.is_file() and path.stat().st_size > 0
+
+
 class HttpsHandler(HttpHandler):
     def __init__(self, config=None, logger=None):
         super().__init__(config, logger)
@@ -24,8 +29,6 @@ class HttpsHoneypot(HttpHoneypot):
     def __init__(self, config, logger, bindaddr="0.0.0.0"):
         super().__init__(config, logger, bindaddr)
         self.handler = HttpsHandler(config=config, logger=logger)
-        # Check if the user has set the TLS key and certificate
-        self.user_set_tls = config.get("key") and config.get("certificate")
         config.setdefault("country_name", None)
         config.setdefault("state_or_province_name", None)
         config.setdefault("locality_name", None)
@@ -64,11 +67,8 @@ class HttpsHoneypot(HttpHoneypot):
         Use the configured key/certificate files when both already exist.
         Otherwise generate a self-signed pair (and write it to those paths).
         '''
-        if self.user_set_tls:
-            if self.certificate_path.is_file() and self.key_path.is_file():
-                return
-            else:
-                raise ValueError(f"HTTPS key/certificate configured but missing: key={self.key_path} certificate={self.certificate_path}")
+        if _has_content(self.key_path) and _has_content(self.certificate_path):
+            return
 
         self.key_path.parent.mkdir(parents=True, exist_ok=True)
         self.certificate_path.parent.mkdir(parents=True, exist_ok=True)
