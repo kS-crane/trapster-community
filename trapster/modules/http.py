@@ -66,7 +66,40 @@ def _patch_hypercorn_reason():
     hyper_h11.H11Protocol._send_h11_event = _send_h11_event
 
 
+def _patch_hypercorn_ssl_shutdown():
+    """Swallow TimeoutError from TLS wait_closed 
+
+    Clients that drop TLS without a clean close_notify raise TimeoutError: "SSL shutdown timed out".
+    Hypercorn leaves it uncaught in TCPServer._close, so this function catches it and aborts the connection.
+
+    REMOVE when fixed upstream:
+      https://github.com/pgjones/hypercorn/pull/342  (TimeoutError + abort)
+      https://github.com/pgjones/hypercorn/issues/202
+    After a hypercorn release that catches TimeoutError, delete this function and its call.
+    """
+    try:
+        from hypercorn.asyncio.tcp_server import TCPServer
+    except Exception:
+        return
+
+    original = TCPServer._close
+
+    async def _close(self):
+        try:
+            await original(self)
+        except TimeoutError:
+            try:
+                transport = self.writer.transport
+                if transport is not None:
+                    transport.abort()
+            except Exception:
+                pass
+
+    TCPServer._close = _close
+
+
 _patch_hypercorn_reason()
+_patch_hypercorn_ssl_shutdown()
 
 # Optional AI import - gracefully handle when AI dependencies aren't installed
 try:
